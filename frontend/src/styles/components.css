@@ -1,0 +1,269 @@
+/* components.css — 通用组件（按钮/输入/选择/卡片/徽标/顶栏/弹层） */
+
+/* ---------- 卡片 ---------- */
+.card {
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+.card-pad {
+  padding: var(--spacing-lg);
+}
+
+.card-title {
+  font-size: var(--fs-h2);
+  font-weight: var(--fw-heading);
+  color: var(--color-heading);
+  margin-bottom: var(--spacing-md);
+}
+
+/* ---------- 按钮 ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-xs);
+  padding: 0 var(--spacing-md);
+  height: 36px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: var(--fs-body);
+  font-weight: var(--fw-emphasis);
+  line-height: 1;
+  transition: background-color 150ms, border-color 150ms, color 150ms, opacity 150ms;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 88%, #000);
+}
+
+.btn-primary:active:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 80%, #000);
+}
+
+.btn-secondary {
+  background: var(--color-surface);
+  color: var(--color-secondary);
+  border-color: var(--color-secondary);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-secondary) 8%, #fff);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--color-textSecondary);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 6%, #fff);
+}
+
+.btn-danger-ghost {
+  background: transparent;
+  color: var(--color-textSecondary);
+}
+
+.btn-danger-ghost:hover:not(:disabled) {
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 6%, #fff);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+/* ---------- 表单 ---------- */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  margin-bottom: var(--spacing-md);
+}
+
+.field-label {
+  font-size: var(--fs-small);
+  font-weight: var(--fw-emphasis);
+  color: var(--color-textSecondary);
+}
+
+.field-error {
+  color: var(--color-danger);
+  font-size: var(--fs-small);
+  min-height: 16px;
+}
+
+.input,
+.select {
+  height: 36px;
+  padding: 0 var(--spacing-sm);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  width: 100%;
+}
+
+.input:focus,
+.select:focus {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -1px;
+  border-color: var(--color-primary);
+}
+
+.select-sm {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 160px;
+}
+
+.filter-bar .select-sm {
+  height: 26px;
+  min-width: 80px;
+}
+
+/* 有意隐藏：Select 自带的空 .field-error 占位会把筛选栏撑高到 56px 破坏单行对齐 */
+.filter-bar .field {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.filter-bar .field-error {
+  display: none;
+}
+
+.input.invalid,
+.select.invalid {
+  border-color: var(--color-danger);
+  outline-color: var(--color-danger);
+}
+
+.input[type='datetime-local'] {
+  font-family: var(--ff-data);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 密码可见切换 */
+.input-wrap {
+  position: relative;
+}
+
+.input-wrap .input {
+  padding-right: 40px;
+}
+
+.input-wrap .input-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: var(--color-textSecondary);
+  display: inline-flex;
+  padding: var(--spacing-xs);
+}
+
+.input-wrap .input-toggle:hover {
+  color: var(--color-primary);
+}
+
+/* 勾选 */
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  cursor: pointer;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+}
+
+.checkbox-row:hover {
+  background: var(--color-background);
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-primary);
+}
+
+.checkbox-row.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---------- 徽标 / 状态点 ---------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--fs-small);
+  color: var(--color-textSecondary);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-ok {
+  background: var(--color-accent);
+}
+
+.status-muted {
+  background: var(--color-textSecondary);
+}
+
+.status-err {
+  background: var(--color-danger);
+}
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 56px;
+  padding: 0 var(--spacing-lg);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.topbar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-family: var(--ff-heading);
+  font-size: var(--fs-title);
+  font-weight: var(--fw-heading);
+  color: var(--color-heading);
+}
+
+.topbar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.topbar-context {
+  font-family: var(--ff-code);
+  font-size: var(--fs-small);
+  color: var(--color-textSecondary);
+}
+

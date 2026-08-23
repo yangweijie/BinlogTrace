@@ -1,0 +1,77 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - img [ref=e6]
+      - generic [ref=e10]: BinlogTrace · MySQL 数据追踪
+    - generic [ref=e12]: 代理异常
+  - main [ref=e14]:
+    - generic [ref=e15]:
+      - generic [ref=e16]:
+        - heading "新建连接" [level=2] [ref=e17]
+        - generic [ref=e18]:
+          - generic [ref=e19]:
+            - generic [ref=e20]: 连接名称
+            - textbox "连接名称" [ref=e22]:
+              - /placeholder: 例如 prod-db
+            - alert [ref=e23]
+          - generic [ref=e24]:
+            - generic [ref=e25]: 数据库（可选）
+            - textbox "数据库（可选）" [ref=e27]:
+              - /placeholder: 留空则追踪前选择
+            - alert [ref=e28]
+        - generic [ref=e29]:
+          - generic [ref=e30]:
+            - generic [ref=e31]: 主机
+            - textbox "主机" [ref=e33]:
+              - /placeholder: 127.0.0.1
+              - text: 127.0.0.1
+            - alert [ref=e34]
+          - generic [ref=e35]:
+            - generic [ref=e36]: 端口
+            - textbox "端口" [ref=e38]: "3306"
+            - alert [ref=e39]
+        - generic [ref=e40]:
+          - generic [ref=e41]:
+            - generic [ref=e42]: 用户
+            - textbox "用户" [ref=e44]:
+              - /placeholder: root
+            - alert [ref=e45]: 用户名必填
+          - generic [ref=e46]:
+            - generic [ref=e47]: 密码
+            - generic [ref=e48]:
+              - textbox "密码" [ref=e49]
+              - button "显示密码" [ref=e50] [cursor=pointer]:
+                - img [ref=e51]
+            - alert [ref=e54]
+        - generic [ref=e55]:
+          - generic [ref=e56] [cursor=pointer]:
+            - checkbox "保存到本地" [checked] [ref=e57]
+            - text: 保存到本地
+          - generic [ref=e58] [cursor=pointer]:
+            - checkbox "演示模式（无代理）" [checked] [ref=e59]
+            - text: 演示模式（无代理）
+        - generic [ref=e60]:
+          - generic [ref=e61] [cursor=pointer]:
+            - checkbox "模拟权限缺失" [ref=e62]
+            - text: 模拟权限缺失
+          - generic [ref=e63] [cursor=pointer]:
+            - checkbox "binlog_format=MIXED" [ref=e64]
+            - text: binlog_format=MIXED
+          - generic [ref=e65] [cursor=pointer]:
+            - checkbox "row_image=MINIMAL" [ref=e66]
+            - text: row_image=MINIMAL
+          - generic [ref=e67] [cursor=pointer]:
+            - checkbox "未开启 Binlog" [ref=e68]
+            - text: 未开启 Binlog
+        - generic [ref=e69]:
+          - button "测试连接" [ref=e70] [cursor=pointer]
+          - button "连接并追踪" [active] [ref=e71] [cursor=pointer]:
+            - img [ref=e72]
+            - text: 连接并追踪
+        - paragraph [ref=e86]: 请修正表单中的必填项。
+      - generic [ref=e78]:
+        - heading "已存连接" [level=2] [ref=e79]
+        - generic [ref=e80]:
+          - img [ref=e81]
+          - paragraph [ref=e84]: 还没有保存的连接
+          - paragraph [ref=e85]: 左侧填写表单并勾选「保存到本地」后，下次从这里一键进入。

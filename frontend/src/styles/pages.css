@@ -1,0 +1,229 @@
+/* pages.css — 页面级布局 */
+
+/* ---------- 连接页 ---------- */
+.connect-grid {
+  display: grid;
+  grid-template-columns: 7fr 5fr;
+  gap: var(--spacing-lg);
+  align-items: start;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-md);
+}
+
+.form-actions {
+  display: flex;
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-sm);
+}
+
+.saved-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--spacing-sm);
+  background: var(--color-surface);
+}
+
+.saved-item:hover {
+  border-color: var(--color-primary);
+}
+
+.saved-item-name {
+  font-size: var(--fs-body);
+  font-weight: var(--fw-emphasis);
+}
+
+.saved-item-sub {
+  font-size: var(--fs-small);
+  color: var(--color-textSecondary);
+  font-family: var(--ff-code);
+}
+
+.saved-item-actions {
+  display: inline-flex;
+  gap: var(--spacing-xs);
+}
+
+/* 检查结果区（连接页/工单页共用） */
+.check-panel {
+  margin-top: var(--spacing-md);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+}
+
+.check-panel-danger {
+  background: color-mix(in srgb, var(--color-danger) 6%, #fff);
+  border: 1px solid var(--color-danger);
+}
+
+.check-panel-warn {
+  background: var(--color-warnBg);
+  border: 1px solid var(--color-update);
+}
+
+.check-panel-ok {
+  background: color-mix(in srgb, var(--color-accent) 6%, #fff);
+  border: 1px solid var(--color-accent);
+}
+
+.check-item {
+  padding: var(--spacing-sm) 0;
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.check-item:last-child {
+  border-bottom: none;
+}
+
+.check-item-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  font-size: var(--fs-body);
+}
+
+.check-item-title {
+  flex: 1;
+}
+
+.check-item-fix {
+  margin-top: var(--spacing-sm);
+  padding-left: 28px;
+}
+
+.check-item-fix-title {
+  font-size: var(--fs-small);
+  color: var(--color-textSecondary);
+  margin-bottom: var(--spacing-xs);
+  font-weight: var(--fw-emphasis);
+}
+
+/* ---------- 工单页 ---------- */
+.trace-wrap {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.trace-card {
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  padding: var(--spacing-lg);
+}
+
+.trace-submit {
+  margin-top: var(--spacing-md);
+}
+
+.trace-progress {
+  height: 4px;
+  background: var(--color-divider);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: var(--spacing-sm);
+}
+
+.trace-progress-bar {
+  height: 100%;
+  background: var(--color-primary);
+  transition: width 200ms;
+}
+
+.trace-pull {
+  margin-top: var(--spacing-sm);
+}
+.trace-pull-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  font-size: var(--fs-small);
+  color: var(--color-textSecondary);
+  margin-bottom: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+.trace-pull-meta .num {
+  color: var(--color-primary);
+  font-weight: var(--fw-emphasis);
+}
+.trace-pull-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+.trace-cancel {
+  margin-left: auto;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  font-size: var(--fs-small);
+}
+.trace-progress-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+
+/* ---------- 回滚页 ---------- */
+.rollback-wrap {
+  max-width: 1080px;
+  margin: 0 auto;
+}
+
+.rollback-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--spacing-md);
+}
+
+.rollback-toolbar-actions {
+  display: inline-flex;
+  gap: var(--spacing-sm);
+}
+
+/* 执行提示卡 */
+.execution-hint {
+  margin-top: var(--spacing-md);
+  display: flex;
+  gap: var(--spacing-sm);
+  align-items: flex-start;
+}
+
+/* 摘要条 */
+.summary-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
+  margin-bottom: var(--spacing-md);
+  font-size: var(--fs-body);
+  color: var(--color-text);
+}
+
+.summary-bar .code {
+  color: var(--color-heading);
+}
+
+.summary-bar .num {
+  color: var(--color-primary);
+  font-weight: var(--fw-heading);
+}
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 900px) {
+  .connect-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar-context {
+    display: none;
+  }
+}

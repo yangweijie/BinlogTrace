@@ -1,0 +1,5 @@
+[0.04s] connected: version=8.0.36
+[0.06s] query#1 OK rows=10
+[0.06s] query#2 REJECTED: MySQL 查询连接建立中，请稍候重试
+REPRO RESULT: CONCURRENT FAIL — 1/2 rejected（下拉将被 error 禁用）
+exit=2

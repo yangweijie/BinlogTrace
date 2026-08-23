@@ -1,0 +1,6 @@
+name: binlog-agent
+mode: bin
+build-dir: build
+output: binlog-agent
+sources:
+  - src

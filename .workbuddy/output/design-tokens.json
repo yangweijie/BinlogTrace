@@ -1,0 +1,74 @@
+{
+  "$name": "mysql-data-trace-tool",
+  "$description": "浏览器内 MySQL 数据追踪工具 UI 设计令牌。基于 design-token business-modern 主题适配，DTCG 格式，驱动前端所有样式决策。",
+  "typography": {
+    "fontFamily": {
+      "heading": { "$type": "fontFamily", "$value": "微软雅黑, Microsoft YaHei, PingFang SC" },
+      "body": { "$type": "fontFamily", "$value": "微软雅黑, Microsoft YaHei, PingFang SC" },
+      "data": { "$type": "fontFamily", "$value": "DIN Next, Arial, sans-serif", "$description": "时间/数值展示" },
+      "code": { "$type": "fontFamily", "$value": "Consolas, Source Code Pro, monospace", "$description": "SQL/事件文本" }
+    },
+    "fontSize": {
+      "title": { "$type": "dimension", "$value": "20px" },
+      "h2": { "$type": "dimension", "$value": "14px" },
+      "body": { "$type": "dimension", "$value": "13px" },
+      "small": { "$type": "dimension", "$value": "12px" },
+      "code": { "$type": "dimension", "$value": "12px" }
+    },
+    "lineHeight": {
+      "body": { "$type": "number", "$value": 1.6 },
+      "compact": { "$type": "number", "$value": 1.2 }
+    },
+    "fontWeight": {
+      "heading": { "$type": "fontWeight", "$value": "600" },
+      "body": { "$type": "fontWeight", "$value": "400" },
+      "emphasis": { "$type": "fontWeight", "$value": "500" }
+    }
+  },
+  "color": {
+    "primary": { "$type": "color", "$value": "#1565C0", "$description": "主品牌蓝：按钮/选中/链接" },
+    "secondary": { "$type": "color", "$value": "#0288D1", "$description": "辅助蓝：次级按钮" },
+    "accent": { "$type": "color", "$value": "#00897B", "$description": "强调/已连接成功" },
+    "background": { "$type": "color", "$value": "#F5F7FA", "$description": "页面背景" },
+    "surface": { "$type": "color", "$value": "#FFFFFF", "$description": "卡片/表格面" },
+    "text": { "$type": "color", "$value": "#212121" },
+    "textSecondary": { "$type": "color", "$value": "#616161" },
+    "heading": { "$type": "color", "$value": "#1A237E" },
+    "divider": { "$type": "color", "$value": "#E0E0E0" },
+    "insert": { "$type": "color", "$value": "#00897B", "$description": "INSERT 变更标识（绿）" },
+    "update": { "$type": "color", "$value": "#F9A825", "$description": "UPDATE 变更标识（琥珀）" },
+    "delete": { "$type": "color", "$value": "#E53935", "$description": "DELETE 变更标识（红）" },
+    "danger": { "$type": "color", "$value": "#E53935", "$description": "错误/回滚危险操作" },
+    "warnBg": { "$type": "color", "$value": "#FFF8E1", "$description": "参数降级警告背景" },
+    "dataViz": {
+      "series1": { "$type": "color", "$value": "#1565C0" },
+      "series2": { "$type": "color", "$value": "#00897B" },
+      "series3": { "$type": "color", "$value": "#F9A825" },
+      "series4": { "$type": "color", "$value": "#E53935" }
+    }
+  },
+  "spacing": {
+    "xs": { "$type": "dimension", "$value": "4px" },
+    "sm": { "$type": "dimension", "$value": "8px" },
+    "md": { "$type": "dimension", "$value": "16px" },
+    "lg": { "$type": "dimension", "$value": "24px" },
+    "xl": { "$type": "dimension", "$value": "32px" }
+  },
+  "radius": {
+    "sm": { "$type": "dimension", "$value": "4px" },
+    "md": { "$type": "dimension", "$value": "8px" }
+  },
+  "layout": {
+    "maxContentWidth": { "$type": "dimension", "$value": "1200px" }
+  },
+  "decoration": {
+    "cardShadow": { "$type": "string", "$value": "0 2px 8px rgba(0,0,0,0.08)" },
+    "headingBorderWidth": { "$type": "dimension", "$value": "4px" }
+  },
+  "icon": {
+    "library": { "$type": "string", "$value": "lucide-react", "$description": "锁定一套统一描边 SVG 图标库" },
+    "sizeInline": { "$type": "dimension", "$value": "16px" },
+    "sizeButton": { "$type": "dimension", "$value": "20px" },
+    "sizeStandalone": { "$type": "dimension", "$value": "24px" }
+  }
+}

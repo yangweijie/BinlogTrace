@@ -1,0 +1,28 @@
+{
+  "permission_rules": [
+    {
+      "tool": "Cmd(php *)",
+      "decision": "allow"
+    },
+    {
+      "tool": "Read",
+      "decision": "allow"
+    },
+    {
+      "tool": "Grep",
+      "decision": "allow"
+    },
+    {
+      "tool": "Cmd(tasklist *)",
+      "decision": "allow"
+    },
+    {
+      "tool": "Cmd(node *)",
+      "decision": "allow"
+    },
+    {
+      "tool": "Cmd(cd *)",
+      "decision": "allow"
+    }
+  ]
+}

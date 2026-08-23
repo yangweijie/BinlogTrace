@@ -1,0 +1,7 @@
+[0.04s] connected: version=8.0.36 user=undefined
+[0.05s] query settled, type=[object Object]
+RES keys: [ 'columns', 'rows' ]
+rows type: [object Array] len=10
+[0.05s] 前端过滤后的 dbOptions: ["shopxo","shengyibao","ec","dp","api","test"]
+REPRO RESULT: OK — 数据管道通畅，若页面仍不可用则是页面状态/旧 JS 问题
+exit=0

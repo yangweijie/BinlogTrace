@@ -1,0 +1,69 @@
+- generic [ref=e87]:
+  - banner [ref=e88]:
+    - generic [ref=e89]:
+      - button "返回连接页" [ref=e90] [cursor=pointer]:
+        - img [ref=e91]
+      - img [ref=e93]
+      - generic [ref=e97]: BinlogTrace · MySQL 数据追踪
+    - generic [ref=e98]:
+      - generic [ref=e99]: 127.0.0.1:3306 (127.0.0.1:3306)
+      - generic [ref=e100]: 代理已连接
+  - main [ref=e102]:
+    - generic [ref=e104]:
+      - heading "新建追踪工单" [level=2] [ref=e105]
+      - generic [ref=e106]:
+        - generic [ref=e107]:
+          - generic [ref=e108]: 数据库
+          - combobox "数据库" [ref=e109]:
+            - option "选择数据库"
+            - option "shop" [selected]
+            - option "blog"
+            - option "hr"
+          - alert [ref=e110]
+        - generic [ref=e111]:
+          - generic [ref=e112]: 数据表
+          - combobox "数据表" [ref=e113]:
+            - option "全部"
+            - option "orders" [selected]
+            - option "payments"
+            - option "users"
+          - alert [ref=e114]
+      - generic [ref=e115]:
+        - generic [ref=e116]:
+          - generic [ref=e117]: 开始时间
+          - textbox "开始时间" [ref=e119]: 2026-08-23T14:59
+          - alert [ref=e120]
+        - generic [ref=e121]:
+          - generic [ref=e122]: 结束时间
+          - textbox "结束时间" [ref=e124]: 2026-08-23T15:59
+          - alert [ref=e125]
+      - generic [ref=e126]:
+        - button "近1小时" [ref=e127] [cursor=pointer]
+        - button "近6小时" [ref=e128] [cursor=pointer]
+        - button "近24小时" [ref=e129] [cursor=pointer]
+      - generic [ref=e130]:
+        - generic [ref=e131] [cursor=pointer]:
+          - checkbox "INSERT" [checked] [ref=e132]
+          - text: INSERT
+        - generic [ref=e134] [cursor=pointer]:
+          - checkbox "UPDATE" [checked] [ref=e135]
+          - text: UPDATE
+        - generic [ref=e137] [cursor=pointer]:
+          - checkbox "DELETE" [checked] [ref=e138]
+          - text: DELETE
+      - status [ref=e141]:
+        - generic [ref=e142]:
+          - img [ref=e143]
+          - generic [ref=e146]: 前置检查通过：Binlog 配置与权限满足追踪要求
+      - generic [ref=e147]:
+        - button [disabled] [ref=e151]:
+          - img [ref=e152]
+        - generic [ref=e154]:
+          - generic [ref=e155]:
+            - generic [ref=e156]: 已拉取 79 条变更
+            - generic [ref=e157]:
+              - text: 预估
+              - generic [ref=e158]: 6%
+            - generic [ref=e159]: 已耗时 0 秒
+            - button "取消拉取" [ref=e160] [cursor=pointer]
+          - progressbar [ref=e161]

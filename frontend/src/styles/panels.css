@@ -1,0 +1,129 @@
+/* panels.css — 状态面板：类型 pill / 三态色点 / 快捷标签 / 提示条 / Toast / 浮动按钮 / 错误横幅 */
+
+/* ---------- 类型 pill ---------- */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  height: 24px;
+  padding: 0 var(--spacing-sm);
+  border-radius: 999px;
+  border: 1px solid var(--color-divider);
+  font-size: var(--fs-small);
+  font-weight: var(--fw-emphasis);
+  line-height: 1;
+}
+
+.pill-insert {
+  color: var(--color-insert);
+  border-color: var(--color-insert);
+}
+
+.pill-update {
+  color: var(--color-update);
+  border-color: var(--color-update);
+}
+
+.pill-delete {
+  color: var(--color-delete);
+  border-color: var(--color-delete);
+}
+
+/* ---------- 连接徽标（三态色方点，用于类型勾选） ---------- */
+.type-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.type-dot-insert {
+  background: var(--color-insert);
+}
+
+.type-dot-update {
+  background: var(--color-update);
+}
+
+.type-dot-delete {
+  background: var(--color-delete);
+}
+
+/* ---------- 快捷标签（时间） ---------- */
+.quick-tag {
+  border: 1px solid var(--color-divider);
+  background: var(--color-surface);
+  color: var(--color-textSecondary);
+  border-radius: var(--radius-sm);
+  height: 26px;
+  padding: 0 var(--spacing-sm);
+  font-size: var(--fs-small);
+}
+
+.quick-tag.active {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 6%, #fff);
+}
+
+/* ---------- 提示条 ---------- */
+.notice {
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-size: var(--fs-small);
+  line-height: var(--lh-body);
+  display: flex;
+  gap: var(--spacing-sm);
+  align-items: flex-start;
+}
+
+.notice-warn {
+  background: var(--color-warnBg);
+  color: var(--color-update);
+}
+
+.notice-danger {
+  background: color-mix(in srgb, var(--color-danger) 8%, #fff);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+}
+
+.notice-info {
+  background: color-mix(in srgb, var(--color-primary) 6%, #fff);
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary);
+}
+
+/* ---------- Toast ---------- */
+.toast {
+  position: fixed;
+  right: var(--spacing-lg);
+  bottom: var(--spacing-lg);
+  background: var(--color-text);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-size: var(--fs-small);
+  box-shadow: var(--shadow-card);
+  z-index: 2000;
+}
+
+/* ---------- 浮动操作 ---------- */
+.fab {
+  position: fixed;
+  right: var(--spacing-lg);
+  bottom: var(--spacing-lg);
+  height: 40px;
+  z-index: 500;
+}
+
+/* ---------- 错误横幅 ---------- */
+.error-banner {
+  border: 1px solid var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 6%, #fff);
+  color: var(--color-danger);
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-size: var(--fs-small);
+  margin-bottom: var(--spacing-md);
+}

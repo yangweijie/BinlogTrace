@@ -1,0 +1,19 @@
+{
+    "name": "yangweijie/typephp_dms-agent-wm",
+    "description": "DMS Agent (Workerman) — WebSocket TCP 代理，纯 PHP 实现，无需 TypePHP 编译器",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.1",
+        "workerman/workerman": "^5.0",
+        "krowinski/php-mysql-replication": "^11.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "DmsAgent\\": "src/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}

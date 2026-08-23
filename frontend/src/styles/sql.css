@@ -1,0 +1,127 @@
+/* sql.css — SQL 预览（语法高亮）+ 代码块 */
+
+.code-block {
+  background: var(--color-background);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-family: var(--ff-code);
+  font-size: var(--fs-code);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  position: relative;
+}
+
+.code-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--spacing-xs);
+  font-size: var(--fs-small);
+  color: var(--color-textSecondary);
+}
+
+/* ---------- SQL 高亮 ---------- */
+.sql-viewport {
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+
+.sql-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--color-divider);
+  background: var(--color-surface);
+  font-size: var(--fs-small);
+  color: var(--color-textSecondary);
+}
+
+.sql-toolbar .num {
+  font-weight: var(--fw-emphasis);
+}
+
+.sql-scroll {
+  overflow: auto;
+  max-height: 62vh;
+  position: relative;
+}
+
+.sql-lines {
+  min-width: 100%;
+}
+
+.sql-line {
+  display: flex;
+  white-space: pre;
+  font-family: var(--ff-code);
+  font-size: var(--fs-code);
+  line-height: 1.55;
+}
+
+.sql-line:hover {
+  background: var(--color-background);
+}
+
+.sql-line-no {
+  flex: 0 0 64px;
+  text-align: right;
+  padding-right: var(--spacing-sm);
+  color: var(--color-textSecondary);
+  background: var(--color-background);
+  border-right: 1px solid var(--color-divider);
+  user-select: none;
+}
+
+.sql-line-code {
+  padding: 0 var(--spacing-md);
+  white-space: pre;
+}
+
+/* 词法 Token 修饰（对应设计提示词 §页面5 高亮表） */
+.tok-main-delete {
+  color: var(--color-delete);
+  font-weight: var(--fw-emphasis);
+}
+
+.tok-main-insert {
+  color: var(--color-insert);
+  font-weight: var(--fw-emphasis);
+}
+
+.tok-main-update {
+  color: var(--color-update);
+  font-weight: var(--fw-emphasis);
+}
+
+.tok-kw {
+  color: var(--color-primary);
+}
+
+.tok-str {
+  color: var(--color-accent);
+}
+
+.tok-num {
+  color: var(--color-secondary);
+  font-family: var(--ff-data);
+}
+
+.tok-null {
+  color: var(--color-textSecondary);
+  font-style: italic;
+}
+
+.tok-comment {
+  color: var(--color-textSecondary);
+  font-style: italic;
+}
+
+.tok-ident {
+  color: var(--color-text);
+}

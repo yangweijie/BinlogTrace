@@ -1,0 +1,79 @@
+/* design-tokens.css — 浏览器内 MySQL 数据追踪工具
+ * 生成自 design-tokens.json（design-token skill / business-modern 适配）
+ * 前端唯一样式入口：禁止硬编码颜色值（唯一例外 #fff #000）
+ * 图标库锁定：lucide-react（一套统一描边 SVG），尺寸 16/20/24px，禁止 emoji 图标
+ */
+
+:root {
+  /* Typography */
+  --ff-heading: 微软雅黑, Microsoft YaHei, PingFang SC;
+  --ff-body: 微软雅黑, Microsoft YaHei, PingFang SC;
+  --ff-data: DIN Next, Arial, sans-serif;
+  --ff-code: Consolas, Source Code Pro, monospace;
+
+  --fs-title: 20px;
+  --fs-h2: 14px;
+  --fs-body: 13px;
+  --fs-small: 12px;
+  --fs-code: 12px;
+
+  --lh-body: 1.6;
+  --lh-compact: 1.2;
+
+  --fw-heading: 600;
+  --fw-body: 400;
+  --fw-emphasis: 500;
+
+  /* Color */
+  --color-primary: #1565C0;
+  --color-secondary: #0288D1;
+  --color-accent: #00897B;
+  --color-background: #F5F7FA;
+  --color-surface: #FFFFFF;
+  --color-text: #212121;
+  --color-textSecondary: #616161;
+  --color-heading: #1A237E;
+  --color-divider: #E0E0E0;
+  --color-insert: #00897B;
+  --color-update: #F9A825;
+  --color-delete: #E53935;
+  --color-danger: #E53935;
+  --color-warnBg: #FFF8E1;
+  --color-dataViz-series1: #1565C0;
+  --color-dataViz-series2: #00897B;
+  --color-dataViz-series3: #F9A825;
+  --color-dataViz-series4: #E53935;
+
+  /* Spacing */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+
+  /* Radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  /* Layout */
+  --layout-maxWidth: 1200px;
+
+  /* Decoration */
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --decoration-headingBorderWidth: 4px;
+
+  /* Icon */
+  --icon-size-inline: 16px;
+  --icon-size-button: 20px;
+  --icon-size-standalone: 24px;
+}
+
+/* 深色主题预留（v1.5 实现，MVP 不启用）
+[data-theme="dark"] {
+  --color-background: #14181F;
+  --color-surface: #1C222B;
+  --color-text: #E6E8EB;
+  --color-textSecondary: #9AA4B2;
+  --color-divider: #2A323D;
+}
+*/

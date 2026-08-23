@@ -1,0 +1,17 @@
+{
+    "name": "yangweijie/typephp_dms",
+    "type": "project",
+    "autoload": {
+        "psr-4": {
+            "Yangweijie\\TypephpDms\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "yangweijie",
+            "email": "917647288@qq.com"
+        }
+    ],
+    "minimum-stability": "dev",
+    "require": {}
+}

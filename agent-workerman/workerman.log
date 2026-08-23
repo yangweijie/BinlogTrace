@@ -1,0 +1,40 @@
+2026-08-22 09:21:00 pid:1 Error: Call to a member function close() on null in D:\git\php\typephp_dms\agent-workerman\src\Mysql\AsyncClient.php:134
+Stack trace:
+#0 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Events\Select.php(483): DmsAgent\Mysql\AsyncClient->{closure:DmsAgent\Mysql\AsyncClient::connect():130}()
+#1 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Events\Select.php(340): Workerman\Events\Select->safeCall(Object(Closure), Array)
+#2 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Events\Select.php(426): Workerman\Events\Select->tick()
+#3 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(1620): Workerman\Events\Select->run()
+#4 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(1536): Workerman\Worker::forkWorkersForWindows()
+#5 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(603): Workerman\Worker::forkWorkers()
+#6 D:\git\php\typephp_dms\agent-workerman\start.php(67): Workerman\Worker::runAll()
+#7 {main}
+2026-08-22 16:22:43 pid:1 RuntimeException: 以一种访问权限不允许的方式做了一个访问套接字的尝试。 in D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php:2462
+Stack trace:
+#0 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(2632): Workerman\Worker->listen(false)
+#1 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(1619): Workerman\Worker->run()
+#2 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(1536): Workerman\Worker::forkWorkersForWindows()
+#3 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(603): Workerman\Worker::forkWorkers()
+#4 D:\git\php\typephp_dms\agent-workerman\start.php(67): Workerman\Worker::runAll()
+#5 {main}
+2026-08-22 16:22:43 pid:1 Worker process terminated
+2026-08-22 16:40:04 pid:1 RuntimeException: 以一种访问权限不允许的方式做了一个访问套接字的尝试。 in D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php:2462
+Stack trace:
+#0 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(2632): Workerman\Worker->listen(false)
+#1 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(1619): Workerman\Worker->run()
+#2 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(1536): Workerman\Worker::forkWorkersForWindows()
+#3 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(603): Workerman\Worker::forkWorkers()
+#4 D:\git\php\typephp_dms\agent-workerman\start.php(67): Workerman\Worker::runAll()
+#5 {main}
+2026-08-22 16:40:04 pid:1 Worker process terminated
+2026-08-23 03:43:38 pid:1 TypeError: is_file(): Argument #1 ($filename) must be of type string, null given in D:\git\php\typephp_dms\agent-workerman\src\WsHandler.php:335
+Stack trace:
+#0 D:\git\php\typephp_dms\agent-workerman\src\WsHandler.php(335): is_file(NULL)
+#1 D:\git\php\typephp_dms\agent-workerman\src\WsHandler.php(279): DmsAgent\WsHandler->drainDumpWorker()
+#2 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Events\Select.php(483): DmsAgent\WsHandler->{closure:DmsAgent\WsHandler::handleBinlogDump():278}()
+#3 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Events\Select.php(340): Workerman\Events\Select->safeCall(Object(Closure), Array)
+#4 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Events\Select.php(426): Workerman\Events\Select->tick()
+#5 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(1620): Workerman\Events\Select->run()
+#6 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(1536): Workerman\Worker::forkWorkersForWindows()
+#7 D:\git\php\typephp_dms\agent-workerman\vendor\workerman\workerman\src\Worker.php(603): Workerman\Worker::forkWorkers()
+#8 D:\git\php\typephp_dms\agent-workerman\start.php(67): Workerman\Worker::runAll()
+#9 {main}

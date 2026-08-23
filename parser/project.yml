@@ -1,0 +1,10 @@
+name: binlog-parser
+mode: library
+build-dir: build
+output: component/binlog-parser.wasm
+sources:
+  - src
+wasm: browser
+wasm-browser-dir: generated
+wasm-package: typephp:binlog-parser@1.0.0
+wasm-world: binlog-parser
