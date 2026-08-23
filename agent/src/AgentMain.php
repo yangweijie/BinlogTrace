@@ -1,38 +1,50 @@
 <?php
-
 declare(strict_types=1);
 
-/**
- * AgentMain — WS TCP 代理入口（TypePHP 原生二进制模式）
- * 监听本地端口，每个浏览器连接一个 ConnectionHandler
- * 用法：./binlog-agent [--port 8080]
- */
 function main(int $argc, array $argv): void
 {
-    $port = AgentConfig::port($argc, $argv);
+    $port = 8080;
+    $host = '127.0.0.1';
+    $dbPort = 3306;
+    $user = 'jaylab';
+    $password = 'o3kBmkhX03ItVVuQ';
+    $database = 'jay_music';
+    $binlogFile = 'mysql-bin.000002';
+    $binlogPos = 4;
 
-    $server = @stream_socket_server('tcp://0.0.0.0:' . $port, $errno, $errstr);
-    if ($server === false) {
-        echo 'binlog-agent: 启动失败 (' . $errstr . ')' . PHP_EOL;
+    for ($i = 1; $i < $argc; $i++) {
+        if ($argv[$i] === '--port' && $i + 1 < $argc) {
+            $port = (int)$argv[$i + 1];
+            $i++;
+        }
+    }
+
+    $client = new Client();
+    if ($client->connect($host, $dbPort, $user, $password, $database, 10)) {
+        error_log('Agent (TypePHP bin) connected to MySQL ' . $host . ':' . $dbPort . ' db=' . $database);
+    } else {
+        error_log('Agent (TypePHP bin) MySQL connect failed');
         return;
     }
-    echo 'binlog-agent: 监听 0.0.0.0:' . $port . PHP_EOL;
+
+    if ($client->binlogDump($binlogFile, $binlogPos, 1, 0)) {
+        error_log('Agent (TypePHP bin) binlog dump started: file=' . $binlogFile . ' pos=' . $binlogPos);
+    }
 
     while (true) {
-        $conn = stream_socket_accept($server, 5);
-        if ($conn === false) {
-            continue;
+        $event = $client->readEvent();
+        if ($event !== false && $event !== null) {
+            error_log('Agent (TypePHP bin) binlog event: type=' . ($event['eventType'] ?? 0) . ' ts=' . ($event['timestamp'] ?? 0) . ' file=' . $binlogFile);
         }
-        try {
-            $handler = new ConnectionHandler($conn);
-            $handler->run();
-        } catch (\Throwable $e) {
-            echo 'agent: handler exception: ' . $e->getMessage() . PHP_EOL;
+        $rows = [];
+        $metaResult = $client->query('SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA');
+        if ($metaResult !== false) {
+            $rows = $metaResult['rows'] ?? [];
+            error_log('Agent (TypePHP bin) meta query returned ' . count($rows) . ' schemas');
         }
-        try {
-            fclose($conn);
-        } catch (\Throwable $e) {
-            echo 'agent: fclose conn error: ' . $e->getMessage() . PHP_EOL;
-        }
+        break;
     }
+
+    $client->close();
+    error_log('Agent (TypePHP bin) stopped');
 }

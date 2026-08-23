@@ -1,6 +1,10 @@
 name: binlog-agent
 mode: bin
-build-dir: build
-output: binlog-agent
+entry: AgentMain.php
 sources:
-  - src
+  - src/
+compiler_options:
+  target: native
+  strict_types: true
+  no_closures: true
+  no_generators: true
