@@ -1,2 +1,4 @@
 /vendor/
 agent-workerman/runtime
+agent-workerman/workerman.log
+agent-workerman/workerman.start.php.pid
