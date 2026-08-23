@@ -29,4 +29,5 @@ final class AgentConstants
     public const BINLOG_POSITION_INVALID = 1011;
     public const TRANSACTION_COMPRESSED = 1012;
     public const META_MISSING = 1013;
+    public const INTERNAL_ERROR = 1099;
 }

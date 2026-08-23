@@ -1,5 +1,5 @@
 // src/lib/ws.ts
-var WS_URL = "ws://127.0.0.1:8080";
+var WS_URL = "http://127.0.0.1:8080";
 var CONNECT_TIMEOUT_MS = 1e4;
 var IDLE_TIMEOUT_MS = 45e3;
 var WsClient = class {
@@ -73,7 +73,7 @@ var WsClient = class {
       ws.onerror = () => {
         if (!settled) {
           settled = true;
-          reject(new Error("\u65E0\u6CD5\u8FDE\u63A5 WS \u4EE3\u7406\uFF08ws://127.0.0.1:8080\uFF09\u3002\u8BF7\u786E\u8BA4\u5DF2\u53CC\u51FB\u8FD0\u884C agent \u5355\u6587\u4EF6\uFF0C\u4E14\u7AEF\u53E3\u672A\u88AB\u5360\u7528\u3002"));
+          reject(new Error("\u65E0\u6CD5\u8FDE\u63A5 WS \u4EE3\u7406\uFF08http://127.0.0.1:8080\uFF09\u3002\u8BF7\u786E\u8BA4\u5DF2\u53CC\u51FB\u8FD0\u884C agent \u5355\u6587\u4EF6\uFF0C\u4E14\u7AEF\u53E3\u672A\u88AB\u5360\u7528\u3002"));
         }
       };
       ws.onclose = () => {

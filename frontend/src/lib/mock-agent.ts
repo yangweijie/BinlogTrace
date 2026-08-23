@@ -79,7 +79,7 @@ export class MockAgent {
           timestamp: Math.floor(startMs + i * step),
           serverId: 1,
         };
-        this.handlers.onEvent(event);
+        this.handlers.onEvent?.(event);
       }, 60 + i * 12);
       this.timers.push(timer);
     };
@@ -87,8 +87,8 @@ export class MockAgent {
       emitAt(i);
     }
     const endTimer = window.setTimeout(() => {
-      this.handlers.onHeartbeat({ ts: Date.now(), binlogPos: payload.binlogPos + count * 32 });
-      this.handlers.onDumpEnd();
+      this.handlers.onHeartbeat?.({ ts: Date.now(), binlogPos: payload.binlogPos + count * 32 });
+      this.handlers.onDumpEnd?.();
     }, 90 + count * 12);
     this.timers.push(endTimer);
   }

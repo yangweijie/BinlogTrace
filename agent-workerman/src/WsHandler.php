@@ -7,24 +7,32 @@ namespace DmsAgent;
 use DmsAgent\Mysql\AsyncClient;
 use DmsAgent\Mysql\KrowinskiQueryAdapter;
 use Workerman\Connection\TcpConnection;
+use Workerman\Protocols\Http\Response;
 use Workerman\Timer;
 
 /**
- * WsHandler — 单浏览器连接全生命周期（协议 v2）
- * 与 agent/src/ConnectionHandler.php（TypePHP 版）功能对齐，基于 Workerman 事件驱动
+ * WsHandler — HTTP 模式下的会话全生命周期（协议 v2）
+ * 与 agent/src/ConnectionHandler.php（TypePHP 版）功能对齐，基于 Workerman 事件驱动。
  *
- * 消息：connect / binlog-dump / query / close / heartbeat
- * 响应：connected / dump-started / binlog-event / query-result / error / heartbeat
+ * 原 WebSocket 模型下每个浏览器 WS 连接持有一个 WsHandler（存在 $conn->context）；
+ * HTTP 无连接，改为 session token 关联：connect 时注册到 SessionManager 并回传 token，
+ * 后续 dump/query/close 请求带 token 取回同一实例，复用其 MySQL 连接与 dump 状态。
  *
- * 每连接一个实例（存放在 $conn->context->handler），并持有独立的 MySQL 异步连接，
- * 因此支持多个浏览器同时追踪（原 TypePHP 版为单连接阻塞模型）。
+ * 路由：POST /connect（请求-响应）、POST /dump（SSE 流式）、POST /query（请求-响应）、POST /close
  *
- * 连接模型：dump 长驻一条 MySQL 连接（ST_BINLOG 事件流）；query 走独立的惰性 MySQL 连接，
- * 因此追踪期间仍可补元数据 / 查库表（前端 query 的 database 字段在此生效）。
+ * 发送模型：
+ *  - 普通请求（connect/query）：每请求只回一帧（connected / query-result / error），用 respondOnce()。
+ *  - dump 请求：先发 text/event-stream 响应头，之后每个 binlog-change/heartbeat/error/binlog-end
+ *    作为一个 SSE event（"data: {frame}\n\n"）持续写出，结束或错误时关闭 SSE 连接。
  */
 final class WsHandler
 {
-    private TcpConnection $conn;
+    private ?TcpConnection $conn = null;
+    /** SSE（dump）长连接的独立引用，便于 close 请求时单独关闭它 */
+    private ?TcpConnection $sseConn = null;
+    private bool $sse = false;
+    private string $sessionToken = '';
+
     /** 主连接：krowinski 适配器（用于 connect 认证 + meta 采集）；binlog-dump 仍用 AsyncClient 子进程 */
     private ?KrowinskiQueryAdapter $mysql = null;
     /** 查询专用连接（krowinski PDO 适配器；与 AsyncClient binlog-dump 分离） */
@@ -62,9 +70,8 @@ final class WsHandler
     /** 子进程 stderr 重定向文件（异常退出时读取错误尾巴） */
     private string $dumpErrFile = '';
 
-    public function __construct(TcpConnection $conn)
+    public function __construct()
     {
-        $this->conn = $conn;
         $this->serverId = random_int(1, 2147483647);
         $this->heartbeatTimer = Timer::add(
             AgentConstants::HEARTBEAT_INTERVAL_MS / 1000,
@@ -74,54 +81,76 @@ final class WsHandler
         );
     }
 
-    /**
-     * Workerman websocket 协议已自动完成握手与 ping/pong，
-     * 这里收到的是完整文本帧载荷（JSON 字符串）。
-     */
-    public function onMessage(string $data): void
-    {
-        $frame = json_decode($data, true);
-        if (!is_array($frame) || !isset($frame['type'])) {
-            $this->sendError('', AgentConstants::PROTOCOL_ERROR, '非 JSON 帧或缺少 type 字段');
-            return;
-        }
-        $type = (string) $frame['type'];
-        $id = (string) ($frame['id'] ?? '');
-        $payload = is_array($frame['payload'] ?? null) ? $frame['payload'] : [];
+    // ─── HTTP 入口 ─────────────────────────────────────────
 
-        switch ($type) {
-            case 'connect':
-                $this->handleConnect($id, $payload);
-                break;
-            case 'binlog-dump':
-                $this->handleBinlogDump($id, $payload);
-                break;
-            case 'query':
-                $this->handleQuery($id, $payload);
-                break;
-            case 'close':
-                $this->handleClose();
-                break;
-            case 'heartbeat':
-                $this->sendHeartbeat();
-                break;
-            default:
-                $this->sendError('', AgentConstants::PROTOCOL_ERROR, '未知消息类型: ' . $type);
-                break;
-        }
+    /** POST /connect — 建立 MySQL 连接并采集元数据，回传 connected（含 session token）或 error */
+    public function onConnect(TcpConnection $connection, array $frame): void
+    {
+        $this->conn = $connection;
+        $this->sse = false;
+        $payload = is_array($frame['payload'] ?? null) ? $frame['payload'] : [];
+        $id = (string) ($frame['id'] ?? '');
+        $this->handleConnect($id, $payload);
     }
 
-    /** WS 连接关闭：清理定时器与 MySQL 连接 */
-    public function onClose(): void
+    /** POST /dump — 启动 binlog 追踪，以 SSE 流持续推送变更 */
+    public function onDump(TcpConnection $connection, array $frame): void
+    {
+        $this->conn = $connection;
+        $this->sseConn = $connection;
+        $this->sse = true;
+        $payload = is_array($frame['payload'] ?? null) ? $frame['payload'] : [];
+        $id = (string) ($frame['id'] ?? '');
+
+        // 关键：dump 是长流，必须持续向同一个 HTTP 连接推送 data 帧。
+        // Workerman 的 HTTP 协议在 onMessage 返回后，会把后续的字符串 send 当成“新 HTTP
+        // 响应”重新包装（或丢弃），导致 SSE 帧到不了客户端；用 Response 发 SSE 头还会自动
+        // 加 Content-Length: 0，浏览器直接判定响应结束。因此切到裸协议（protocol=null，
+        // TcpConnection::send 跳过 encode 直接裸写），手动写 SSE 头，后续 send 帧直接裸写
+        // 到 socket，实现真正的 text/event-stream 流式推送。
+        $connection->protocol = null;
+        $header = "HTTP/1.1 200 OK\r\n"
+            . "Content-Type: text/event-stream; charset=utf-8\r\n"
+            . "Cache-Control: no-cache, no-transform\r\n"
+            . "Connection: keep-alive\r\n"
+            . "Access-Control-Allow-Origin: *\r\n"
+            . "X-Accel-Buffering: no\r\n"
+            . "\r\n";
+        $connection->send($header);
+
+        $this->handleBinlogDump($id, $payload);
+    }
+
+    /** POST /query — 执行只读查询，回传 query-result 或 error */
+    public function onQuery(TcpConnection $connection, array $frame): void
+    {
+        $this->conn = $connection;
+        $this->sse = false;
+        $payload = is_array($frame['payload'] ?? null) ? $frame['payload'] : [];
+        $id = (string) ($frame['id'] ?? '');
+        $this->handleQuery($id, $payload, $connection);
+    }
+
+    /** POST /close — 销毁会话，关闭 MySQL/dump，确认关闭 */
+    public function onCloseRequest(TcpConnection $connection, array $frame): void
+    {
+        $this->conn = $connection;
+        $this->sse = false;
+        $this->handleClose();
+        $connection->send(new Response(200, $this->withCors(['Content-Type' => 'application/json; charset=utf-8']), json_encode([
+            'ok' => true,
+            'session' => $this->sessionToken,
+        ], JSON_UNESCAPED_SLASHES)));
+    }
+
+    /** 清理定时器与 MySQL 连接（会话销毁时） */
+    public function destroy(): void
     {
         if ($this->heartbeatTimer !== false) {
             Timer::del($this->heartbeatTimer);
             $this->heartbeatTimer = false;
         }
-        if ($this->mysql !== null) {
-            $this->mysql->close();
-            $this->mysql = null;
-        }
+        $this->teardownMysql();
         $this->teardownQuery();
         $this->teardownDumpWorker();
         $this->connected = false;
@@ -134,7 +163,7 @@ final class WsHandler
     {
         // 连接已建立或正在建立中（覆盖进行中的 connect），拒绝重复发起
         if ($this->mysql !== null) {
-            $this->sendError($id, AgentConstants::INVALID_PARAM, '连接已建立或正在建立中，请先 close');
+            $this->respondOnce($id, 'error', ['code' => AgentConstants::INVALID_PARAM, 'message' => '连接已建立或正在建立中，请先 close']);
             return;
         }
         $host = (string) ($payload['host'] ?? '');
@@ -146,7 +175,7 @@ final class WsHandler
         $clientId = (int) ($payload['serverId'] ?? 0);
 
         if ($host === '') {
-            $this->sendError($id, AgentConstants::INVALID_PARAM, 'host 不能为空');
+            $this->respondOnce($id, 'error', ['code' => AgentConstants::INVALID_PARAM, 'message' => 'host 不能为空']);
             return;
         }
         if ($clientId > 0) {
@@ -175,7 +204,7 @@ final class WsHandler
             $self->onMysqlConnected($id);
         } else {
             $self = $this;
-            $self->sendError($id, 1001, 'MySQL 认证失败（krowinski 适配器无法建立 PDO 连接）');
+            $self->respondOnce($id, 'error', ['code' => 1001, 'message' => 'MySQL 认证失败（krowinski 适配器无法建立 PDO 连接）']);
             $self->teardownMysql();
         }
     }
@@ -192,7 +221,10 @@ final class WsHandler
             if (($metaData['hasBinlog'] ?? false) === true) {
                 $self->binlogFile = (string) ($metaData['binlogFile'] ?? '');
             }
-            $self->sendFrame($id, 'connected', $metaData);
+            // 注册会话，生成 token 并回传（后续 dump/query/close 凭此关联）
+            $self->sessionToken = SessionManager::create($self);
+            $metaData['session'] = $self->sessionToken;
+            $self->respondOnce($id, 'connected', $metaData);
         });
     }
 
@@ -340,7 +372,7 @@ final class WsHandler
         }
     }
 
-    /** 结束 krowinski 子进程（kill + 停轮询 + 清理临时文件） */
+    /** 结束 krowinski 子进程（kill + 停轮询 + 清理临时文件），并关闭 SSE 连接 */
     private function teardownDumpWorker(): void
     {
         if ($this->dumpTimer !== false) {
@@ -366,6 +398,10 @@ final class WsHandler
         $this->dumpOffset = 0;
         $this->dumpBuffer = '';
         $this->dumping = false;
+        if ($this->sse && $this->sseConn !== null) {
+            $this->sseConn->close();
+            $this->sseConn = null;
+        }
     }
 
     private function relayEvent(array $event): void
@@ -380,23 +416,24 @@ final class WsHandler
         ]);
     }
 
-    private function handleQuery(string $id, array $payload): void
+    private function handleQuery(string $id, array $payload, TcpConnection $connection): void
     {
         if (!$this->connected || $this->mysqlHost === '') {
-            $this->sendError($id, AgentConstants::PROXY_NOT_READY, '尚未连接 MySQL');
+            $this->respondOnce($id, 'error', ['code' => AgentConstants::PROXY_NOT_READY, 'message' => '尚未连接 MySQL']);
             return;
         }
         $sql = (string) ($payload['sql'] ?? '');
         $trimmed = trim($sql);
         if (!preg_match('/^\s*(SELECT|SHOW)\b.*$/i', $trimmed)) {
-            $this->sendError($id, AgentConstants::PROTOCOL_ERROR, '仅允许只读查询');
+            $this->respondOnce($id, 'error', ['code' => AgentConstants::PROTOCOL_ERROR, 'message' => '仅允许只读查询']);
             return;
         }
         // 帧内 database 优先（前端 useSchemaMeta 查表会传目标库），缺省沿用连接库
         $database = trim((string) ($payload['database'] ?? ''));
         // 单 MySQL 连接一次只能执行一条查询：并发帧（如 React StrictMode 双挂载连发
-        // 库列表）排队串行执行，不再回错误帧——错误帧会令前端下拉被禁用
-        $this->queryQueue[] = ['id' => $id, 'sql' => $sql, 'database' => $database];
+        // 库列表）排队串行执行，不再回错误帧——错误帧会令前端下拉被禁用。
+        // 每个队列项绑定自己的 HTTP 连接，响应时各自发回，复用同一查询连接串行化。
+        $this->queryQueue[] = ['id' => $id, 'sql' => $sql, 'database' => $database, 'conn' => $connection];
         $this->drainQueryQueue();
     }
 
@@ -426,6 +463,8 @@ final class WsHandler
         $id = (string) $item['id'];
         $sql = (string) $item['sql'];
         $db = $item['database'] !== '' ? (string) $item['database'] : $this->mysqlDatabase;
+        /** @var TcpConnection $conn */
+        $conn = $item['conn'];
         $client = $this->queryMysql;
         // Krowinski 适配器：同步建连，无 isAlive/isConnected/getCurrentDatabase 区分，
         // 直接检查 isConnected()；库匹配简化处理（每次重建连接时传入目标库）
@@ -434,7 +473,7 @@ final class WsHandler
             $self = $this;
             $client->query(
                 $sql,
-                function (array $result) use ($self, $id): void {
+                function (array $result) use ($self, $id, $conn): void {
                     $colOut = [];
                     foreach (($result['columns'] ?? []) as $col) {
                         $colOut[] = [
@@ -442,14 +481,14 @@ final class WsHandler
                             'type' => (string) ($col['type'] ?? ''),
                         ];
                     }
-                    $self->sendFrame($id, 'query-result', [
+                    $self->respondOnce($id, 'query-result', [
                         'columns' => $colOut,
                         'rows' => $result['rows'] ?? [],
-                    ]);
+                    ], $conn);
                     $self->drainQueryQueue();
                 },
-                function (int $code, string $message) use ($self, $id): void {
-                    $self->sendError($id, $code, $message);
+                function (int $code, string $message) use ($self, $id, $conn): void {
+                    $self->respondOnce($id, 'error', ['code' => $code, 'message' => $message], $conn);
                     $self->drainQueryQueue();
                 }
             );
@@ -479,7 +518,7 @@ final class WsHandler
             array_shift($this->queryQueue);
             $fresh->query(
                 $sql,
-                function (array $result) use ($self, $id): void {
+                function (array $result) use ($self, $id, $conn): void {
                     $colOut = [];
                     foreach (($result['columns'] ?? []) as $col) {
                         $colOut[] = [
@@ -487,14 +526,14 @@ final class WsHandler
                             'type' => (string) ($col['type'] ?? ''),
                         ];
                     }
-                    $self->sendFrame($id, 'query-result', [
+                    $self->respondOnce($id, 'query-result', [
                         'columns' => $colOut,
                         'rows' => $result['rows'] ?? [],
-                    ]);
+                    ], $conn);
                     $self->drainQueryQueue();
                 },
-                function (int $code, string $message) use ($self, $id): void {
-                    $self->sendError($id, $code, $message);
+                function (int $code, string $message) use ($self, $id, $conn): void {
+                    $self->respondOnce($id, 'error', ['code' => $code, 'message' => $message], $conn);
                     $self->drainQueryQueue();
                 }
             );
@@ -503,7 +542,7 @@ final class WsHandler
         // 建连失败
         $this->queryConnecting = false;
         array_shift($this->queryQueue);
-        $self->sendError($id, 1002, '查询连接失败（krowinski 适配器）');
+        $self->respondOnce($id, 'error', ['code' => 1002, 'message' => '查询连接失败（krowinski 适配器）'], $conn);
         $self->drainQueryQueue();
     }
 
@@ -514,8 +553,10 @@ final class WsHandler
         $this->teardownMysql();
         $this->teardownQuery();
         $this->teardownDumpWorker();
-        // Workerman websocket 协议会发送 close 帧并关闭连接
-        $this->conn->close();
+        if ($this->sessionToken !== '') {
+            SessionManager::remove($this->sessionToken);
+            $this->sessionToken = '';
+        }
     }
 
 
@@ -529,28 +570,65 @@ final class WsHandler
 
     private function sendHeartbeat(): void
     {
+        // 仅 SSE（dump）期间推送心跳；HTTP 短连接无需心跳
+        if (!$this->sse) {
+            return;
+        }
         $this->sendFrame('', 'heartbeat', [
             'ts' => self::now(),
             'binlogPos' => null,
         ]);
     }
 
+    /**
+     * 统一帧发送：
+     *  - SSE 模式：直接写出 "data: {frame}\n\n"，error/binlog-end 后由 teardown 关闭 SSE 连接。
+     *  - 普通请求模式：本方法不再直接响应（由 respondOnce 处理单帧响应）。
+     */
     private function sendFrame(string $id, string $type, array $payload): void
     {
-        if ($this->conn->getStatus() !== TcpConnection::STATUS_ESTABLISHED) {
-            return;
-        }
-        $json = json_encode([
+        $frame = [
             'v' => AgentConstants::PROTOCOL_VERSION,
             'id' => $id,
             'type' => $type,
             'ts' => self::now(),
             'payload' => $payload,
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        ];
+        $json = json_encode($frame, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
             return;
         }
-        $this->conn->send($json);
+        if ($this->sse && $this->conn !== null) {
+            $this->conn->send("data: " . $json . "\n\n");
+        }
+        // 非 SSE：不在此直接发送（connect/query 通过 respondOnce 回单帧）
+    }
+
+    /** 合并 CORS 响应头（开发期前端与 agent 跨域，统一开启） */
+    private function withCors(array $headers): array
+    {
+        return array_merge(['Access-Control-Allow-Origin' => '*'], $headers);
+    }
+
+    /** 普通请求（connect/query）的单帧 HTTP 响应 */
+    private function respondOnce(string $id, string $type, array $payload, ?TcpConnection $conn = null): void
+    {
+        $target = $conn ?? $this->conn;
+        if ($target === null) {
+            return;
+        }
+        $frame = [
+            'v' => AgentConstants::PROTOCOL_VERSION,
+            'id' => $id,
+            'type' => $type,
+            'ts' => self::now(),
+            'payload' => $payload,
+        ];
+        $json = json_encode($frame, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($json === false) {
+            return;
+        }
+        $target->send(new Response(200, $this->withCors(['Content-Type' => 'application/json; charset=utf-8']), $json));
     }
 
     private function teardownMysql(): void

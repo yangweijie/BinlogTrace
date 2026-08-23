@@ -1,66 +1,88 @@
 <?php
 
-declare(strict_types=1);
+require_once __DIR__ . '/vendor/autoload.php';
 
-use DmsAgent\WsHandler;
-use Workerman\Connection\TcpConnection;
-use Workerman\Protocols\Websocket;
 use Workerman\Worker;
+use Workerman\Connection\TcpConnection;
+use Workerman\Protocols\Http\Request;
+use Workerman\Protocols\Http\Response;
+use DmsAgent\SessionManager;
+use DmsAgent\WsHandler;
 
-require __DIR__ . '/vendor/autoload.php';
-
-/**
- * DMS Agent（Workerman 版）入口 — WebSocket TCP 代理，纯 PHP 运行，无需 TypePHP 编译器
- *
- * 用法：
- *   php start.php start                # 前台启动（Windows / Linux 均支持）
- *   php start.php start -d             # 守护进程模式（仅 Linux）
- *   php start.php stop | restart       # 管理命令（仅 Linux 守护模式）
- *   php start.php --port 9090          # 自定义端口（默认 8080）
- *
- * 与前端契约：协议 v2，帧 {v,id,type,ts,payload}，见 frontend/src/lib/ws.ts
- */
-
-$port = 8080;
-$rawArgv = $argv ?? [];
-$argc = count($rawArgv);
-for ($i = 0; $i < $argc; $i++) {
-    if ($rawArgv[$i] === '--port' && isset($rawArgv[$i + 1]) && is_numeric($rawArgv[$i + 1])) {
-        $port = (int) $rawArgv[$i + 1];
-        break;
-    }
+$port = (int) ($_SERVER['argv'][2] ?? 8080);
+if (!is_numeric($port) || $port < 1 || $port > 65535) {
+    $port = 8080;
 }
 
-$worker = new Worker('websocket://0.0.0.0:' . $port);
-$worker->name = 'dms-agent';
-// 单进程（Windows 下 workerman 本就只支持单进程；binlog 追踪为每连接独立状态）
+// HTTP 协议：Workerman 会把每个请求解析为 Request 对象传入 onMessage 的第二个参数。
+// 不再依赖 WebSocket 升级握手。
+$worker = new Worker("http://0.0.0.0:{$port}");
+
 $worker->count = 1;
 
-$worker->onWorkerStart = function () use ($port): void {
-    echo '[agent-workerman] 监听 websocket://0.0.0.0:' . $port . ' (协议 v2)' . PHP_EOL;
-    echo '[agent-workerman] 提示: 无内置认证，仅限内网使用' . PHP_EOL;
-};
+function jsonResponse(array $data, int $status = 200): Response
+{
+    return new Response($status, [
+        'Content-Type' => 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin' => '*',
+        'Access-Control-Allow-Methods' => 'POST, GET, OPTIONS',
+        'Access-Control-Allow-Headers' => 'Content-Type',
+    ], json_encode($data, JSON_UNESCAPED_SLASHES));
+}
 
-$worker->onConnect = function (TcpConnection $conn): void {
-    // 增大发送缓冲，避免大 binlog 事件 + 慢客户端时丢帧
-    $conn->maxSendBufferSize = 64 * 1024 * 1024;
-    // 出站一律 text 帧（默认即 BLOB，显式声明避免后续被改写）
-    $conn->websocketType = Websocket::BINARY_TYPE_BLOB;
-    $conn->context->handler = new WsHandler($conn);
-};
+$worker->onMessage = function (TcpConnection $connection, Request $request) {
+    $path = trim($request->path(), '/');
+    $method = strtoupper($request->method());
 
-$worker->onMessage = function (TcpConnection $conn, string $data): void {
-    $handler = $conn->context->handler ?? null;
-    if ($handler instanceof WsHandler) {
-        $handler->onMessage($data);
+    // CORS 预检
+    if ($method === 'OPTIONS') {
+        $connection->send(new Response(204, [
+            'Access-Control-Allow-Origin' => '*',
+            'Access-Control-Allow-Methods' => 'POST, GET, OPTIONS',
+            'Access-Control-Allow-Headers' => 'Content-Type',
+        ]));
+        return;
     }
-};
 
-$worker->onClose = function (TcpConnection $conn): void {
-    $handler = $conn->context->handler ?? null;
-    if ($handler instanceof WsHandler) {
-        $handler->onClose();
-        $conn->context->handler = null;
+    if ($method !== 'POST') {
+        $connection->send(jsonResponse(['ok' => false, 'error' => ['code' => 1010, 'message' => '仅支持 POST']], 405));
+        return;
+    }
+
+    $raw = (string) $request->rawBody();
+    $frame = json_decode($raw, true);
+    if (!is_array($frame) || !isset($frame['type'])) {
+        $connection->send(jsonResponse(['ok' => false, 'error' => ['code' => 1010, 'message' => '无效的帧']], 400));
+        return;
+    }
+
+    switch ($path) {
+        case 'connect':
+            // connect 新建会话并自注册到 SessionManager，connected 帧回传 session token
+            $handler = new WsHandler();
+            $handler->onConnect($connection, $frame);
+            break;
+        case 'dump':
+        case 'query':
+        case 'close': {
+            $token = (string) ($frame['payload']['session'] ?? '');
+            $handler = SessionManager::get($token);
+            if ($handler === null) {
+                $connection->send(jsonResponse(['ok' => false, 'error' => ['code' => 1006, 'message' => '会话不存在或已失效，请重新连接']], 404));
+                break;
+            }
+            if ($path === 'dump') {
+                $handler->onDump($connection, $frame);
+            } elseif ($path === 'query') {
+                $handler->onQuery($connection, $frame);
+            } else {
+                $handler->onCloseRequest($connection, $frame);
+            }
+            break;
+        }
+        default:
+            $connection->send(jsonResponse(['ok' => false, 'error' => ['code' => 1010, 'message' => "未知路由: {$path}"]], 404));
+            break;
     }
 };
 
