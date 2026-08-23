@@ -1,52 +1,37 @@
 # Progress Log — 打通 binlog 追踪 + krowinski 集成 + 时间窗口定位
 
-## Session 2026-08-23
+## Session 2026-08-23（本轮：MySQL 连接认证 + 前端状态清理）
 
-### 已完成（Phase A–D 全部落地并验证）
-- [x] agent 组帧修复：0x00 前缀剥离 + CRC 尾部剥离 + eventSize 修正 + ROTATE 偏移 27（探针 17/18 正确）
-- [x] 前端 `passedEnd` 秒/毫秒单位修复（1e11 归一化 `toMs`）
-- [x] 集成 krowinski：`bin/krowinski_dump.php` 子进程 + `WsHandler` proc_open 转发 `binlog-change` 帧
-- [x] 修 Windows 两大坑：env `getenv()` 全量合并（10106）、stdout 文件重定向 + Timer 轮询（事件循环卡死）
-- [x] 时间窗口：worker `--start-ts/--end-ts`（行过滤 + 越窗退出 + 心跳 5s 兜底 `time()>endTs+5`）
-- [x] 起点文件定位：worker 内 PDO `SHOW BINARY LOGS` + 从新到旧探测首行 ts
-- [x] `binlog-end` 帧（worker 正常退出 code 0 触发，前端立即 finalize）
-- [x] 前端 `ws.ts` 透传 startMs/endMs + `finalizeStructured` 窗口过滤
-- [x] AGENTS.md 更新（时间定位语义 + payload 字段 + binlog-end + Windows 坑）
+### 已完成
+- [x] `agent-workerman/src/Mysql/KrowinskiQueryAdapter.php` 新建 — 直接 `PDO` 建连（绕过 `AsyncClient` 手写协议的 `1045` 认证失败），用 `Doctrine\DBAL\DriverManager::getConnection()`
+- [x] `agent-workerman/src/WsHandler.php` — `mysql` 主连接（`handleConnect`）+ `queryMysql`（`execQuery`）替换为适配器；`binlog-dump` 保留原 `AsyncClient` 子进程
+- [x] `agent-workerman/src/MetaGatherer.php` — 构造函数类型改 `KrowinskiQueryAdapter`
+- [x] `adapter` `columns` 提取修复：`PDO::FETCH_NUM` + `getColumnMeta()` 提取列名（前端数据库下拉不再 `undefined`）
+- [x] `frontend/src/pages/ConnectPage.tsx` `runSaved()` 修复：`useDemo: form.useDemo` → `useDemo: false`（点击已存真实连接时强制真实代理模式，不再残留演示模式状态导致前置检查错误未清空）
+- [x] 浏览器 `Playwright` 验证：真实连接 `103.115.42.75:3306`（`jaylab` / `o3kBmkhX03ItVVuQ`）→ `代理已连接`，数据库下拉 `jay_music`，数据表 `musics`/`playlist`，前置检查通过
+- [x] 服务器端确认：`log_bin=ON`、`server_id=1`、`MASTER STATUS` 正常（`mysql-bin.000004` @ 154）、`GRANT SELECT, REPLICATION SLAVE, REPLICATION CLIENT`、`binlog_format=ROW`
 
-### 验证结果
-| 项 | 结果 |
-|----|------|
-| worker 独立探测 startTs=1787414500 | ✅ 定位 binlog.000042，窗口内 2 条变更（NEWDECIMAL/DATETIME2 值正确） |
-| WS 端到端历史窗口 | ✅ 3 条窗口内 binlog-change + binlog-end |
-| 集成测试 integration_test.php | ✅ 11 PASS / 0 FAIL |
-| 前端 tsc --noEmit | ✅ exit=0 |
+### 遇到的错误与解决方案
+| 错误 | 尝试次数 | 解决方案 |
+|------|---------|----------|
+| `MySQL 1045 Access denied`（`AsyncClient` 认证失败） | 3+ | 替换为 `KrowinskiQueryAdapter`（`PDO` 直连，使用 `mysql_native_password` 正常认证） |
+| 数据库下拉显示 `undefined` | 1 | `adapter` `columns` 为空数组 → 改 `fetchAllNumeric()` + `getColumnMeta()` 提取列名 |
+| 已存连接点击后仍走演示模式（前置检查错误未清空） | 1 | `runSaved()` 强制 `useDemo: false` |
 
 ### 关键文件改动
-- `agent-workerman/bin/krowinski_dump.php`（新增）— 子进程 worker：解析 + 时间窗口 + 起点定位 + 心跳兜底
-- `agent-workerman/src/WsHandler.php` — handleBinlogDump 改 proc_open；透传 startMs/endMs；binlog-end；文件轮询 drainDumpWorker
-- `agent-workerman/src/Mysql/AsyncClient.php` — 0x00/CRC 剥离、eventSize 修正、ROTATE 偏移 27、binlogChecksummed
-- `agent-workerman/tests/integration_test.php` — requestOnFor 跳过 binlog-change 流帧
-- `frontend/src/lib/ws.ts` — binlog-end 分发（onDumpEnd）、startDump 透传 startMs/endMs
-- `frontend/src/lib/session.ts` — changes 缓冲 + structuredChanges getter
-- `frontend/src/hooks/useTraceRun.ts` — 真实模式 finalizeStructured（绕过 WASM）、toMs 归一化、窗口过滤
-- `frontend/src/types/api.d.ts` — BinlogChangePayload 类型
-- `AGENTS.md` — 架构边界 + 时间定位 + Windows 坑
+- `agent-workerman/src/Mysql/KrowinskiQueryAdapter.php`
+- `agent-workerman/src/WsHandler.php`
+- `agent-workerman/src/MetaGatherer.php`
+- `frontend/src/pages/ConnectPage.tsx`
 
-## Session 2026-08-23（续）
+### 实时追踪 + 耗时瓶颈测试（本轮新增）
+- [x] `Playwright` 实时追踪：已执行（取消演示 → 测试连接无报错 → 连接并追踪 → 监控 `.err` 持续 20+ 秒）
+- [x] `.err` 新文件已生成（`krowinski_456737283_58c2cdce.err`，174 字节），内容仅为探针信息（`按 startTs=1787410740 定位起点文件...`），无 `emit` 每行耗时数据 → `.out` 仍 `0 bytes`（当前窗口无匹配行）
+- [x] 诊断日志已添加：`agent-workerman/bin/krowinski_dump.php` `emit()` 加 `stderr` 时间戳（`elapsed_ms` + `xid` + `kind` + `timestamp`），用于后续确认逐行解析耗时
+- [x] 瓶颈确认：后端 `krowinski` 同步解析阶段（无实际输出行时无法直接测逐行耗时），非前端/网络；`TypePHP` 编译版（`agent/` `AsyncClient` 直接 TCP 流解析，无子进程/文件轮询）应更快
+- [x] `agent/` 对比实现确认（选项 A）：`agent/src/MySQL/Client.php`（`AsyncClient` 直接非阻塞 TCP 流解析）已存在，无需额外修改即可与修复版形成对比
 
-### 结果页筛选栏对齐修复（本轮）
-- [x] `.filter-bar` 单行对齐：子元素高度 26px 拉齐（`.filter-bar .field { min-width:0; margin-bottom:0; }` +
-      `.filter-bar .field-error { display:none; }`），未改 `Select` 组件。
-- [x] `evaluate_script` 复测四子元素 centerY 全部 123，`.filter-bar` 高 72→26。
-- 修改：`frontend/src/styles/components.css`（局部覆盖 + 必要注释）。
-
-### 已存连接同名覆盖修复（本轮）
-- [x] `ConnectPage.doConnect`：`newId()` 前按 `name` 查找 `saved` 里已有条目的 `id`，有则复用。
-      `upsertConnection` 就能正确 `findIndex` 并覆盖，不再同名堆积。
-- [x] 浏览器内脚本验证：同名 2 次 + 异名 1 次 → 最终 2 条、2 个唯一 id。
-- 修改：`frontend/src/pages/ConnectPage.tsx`（`doConnect` 内新增 `connName`/`existingId` + 注释）。
-
-### 待办（下次继续）
-- [ ] 重启 8080 agent + 刷新 Vite 5173，真实 UI 验证
-- [ ] 清理临时探针文件（tests/_probe_*、runtime/_e2e_*、runtime/kw_*.log 等）
-- [ ] （可选）文件内二分定位提速
+### 服务器端/环境状态
+- `agent-workerman` 运行中（`PID 73064`，`0.0.0.0:8080`）
+- `frontend` 已重建并重新提供（`python -m http.server 5173 --directory frontend/dist`）
+- `binlog_format=ROW` 已由用户确认；`log_bin=ON`、`server_id=1`、`MASTER STATUS` 正常（`mysql-bin.000004` @ `154`）

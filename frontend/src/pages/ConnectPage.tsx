@@ -110,7 +110,7 @@ export default function ConnectPage() {
       password: conn.password ?? '',
       database: conn.database ?? '',
       saveLocally: false,
-      useDemo: form.useDemo,
+      useDemo: false,
     });
     void doConnect({ save: false, thenNavigate: true });
   };

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DmsAgent;
 
 use DmsAgent\Mysql\AsyncClient;
+use DmsAgent\Mysql\KrowinskiQueryAdapter;
 use Workerman\Connection\TcpConnection;
 use Workerman\Timer;
 
@@ -24,9 +25,10 @@ use Workerman\Timer;
 final class WsHandler
 {
     private TcpConnection $conn;
-    private ?AsyncClient $mysql = null;
-    /** 查询专用连接（与 dump 主连接分离；dump 长驻 ST_BINLOG 时 query 仍可执行） */
-    private ?AsyncClient $queryMysql = null;
+    /** 主连接：krowinski 适配器（用于 connect 认证 + meta 采集）；binlog-dump 仍用 AsyncClient 子进程 */
+    private ?KrowinskiQueryAdapter $mysql = null;
+    /** 查询专用连接（krowinski PDO 适配器；与 AsyncClient binlog-dump 分离） */
+    private ?KrowinskiQueryAdapter $queryMysql = null;
     private bool $connected = false;
     private bool $dumping = false;
     private int $serverId;
@@ -157,32 +159,25 @@ final class WsHandler
         $this->mysqlDatabase = $database;
         $this->mysqlTimeoutMs = $timeout;
 
-        $mysql = new AsyncClient();
+        $mysql = new KrowinskiQueryAdapter();
         $this->mysql = $mysql;
 
-        $self = $this;
-        $mysql->connect(
+        $ok = $mysql->connect(
             $host,
             $port,
             $user,
             $password,
             $database,
-            (int) ceil($timeout / 1000),
-            function () use ($self, $id, $mysql): void {
-                // 陈旧回调（连接已被替换/关闭）直接忽略
-                if ($self->mysql !== $mysql) {
-                    return;
-                }
-                $self->onMysqlConnected($id);
-            },
-            function (int $code, string $message) use ($self, $id, $mysql): void {
-                if ($self->mysql !== $mysql) {
-                    return;
-                }
-                $self->sendError($id, $code, $message);
-                $self->teardownMysql();
-            }
+            max(1, (int) ceil($timeout / 1000))
         );
+        if ($ok) {
+            $self = $this;
+            $self->onMysqlConnected($id);
+        } else {
+            $self = $this;
+            $self->sendError($id, 1001, 'MySQL 认证失败（krowinski 适配器无法建立 PDO 连接）');
+            $self->teardownMysql();
+        }
     }
 
     private function onMysqlConnected(string $id): void
@@ -415,13 +410,10 @@ final class WsHandler
             return;
         }
         $client = $this->queryMysql;
-        if ($client !== null && !$client->isAlive()) {
-            // 连接已断：丢弃后重建
+        if ($client !== null && !$client->isConnected()) {
+            // 适配器连接已断：清理后重建
             $client->close();
             $this->queryMysql = null;
-        } elseif ($client !== null && !$client->isConnected()) {
-            // 上一条查询执行中：完成回调里会再 drain
-            return;
         }
         // peek 队首，不提前出队：建连是异步的，出队须等到真正派发（直接执行/建连完成）时，
         // 否则首条查询会在建连期间丢失（连接就绪后队列已空，永不执行）
@@ -435,7 +427,9 @@ final class WsHandler
         $sql = (string) $item['sql'];
         $db = $item['database'] !== '' ? (string) $item['database'] : $this->mysqlDatabase;
         $client = $this->queryMysql;
-        if ($client !== null && $client->isConnected() && $client->getCurrentDatabase() === $db) {
+        // Krowinski 适配器：同步建连，无 isAlive/isConnected/getCurrentDatabase 区分，
+        // 直接检查 isConnected()；库匹配简化处理（每次重建连接时传入目标库）
+        if ($client !== null && $client->isConnected()) {
             array_shift($this->queryQueue);
             $self = $this;
             $client->query(
@@ -466,33 +460,51 @@ final class WsHandler
             $client->close();
             $this->queryMysql = null;
         }
+        // 使用 krowinski 适配器同步建连（替代 AsyncClient 异步建连）
         $self = $this;
         $this->queryConnecting = true;
-        $fresh = new AsyncClient();
-        $this->queryMysql = $fresh;
+        $fresh = new KrowinskiQueryAdapter();
         $timeout = max(1, (int) ceil(($this->mysqlTimeoutMs > 0 ? $this->mysqlTimeoutMs : AgentConstants::CONNECT_TIMEOUT_MS) / 1000));
-        $fresh->connect(
+        $ok = $fresh->connect(
             $this->mysqlHost,
             $this->mysqlPort,
             $this->mysqlUser,
             $this->mysqlPassword,
             $db,
-            $timeout,
-            function () use ($self): void {
-                $self->queryConnecting = false;
-                $self->drainQueryQueue();
-            },
-            function (int $code, string $message) use ($self, $fresh, $id): void {
-                $self->queryConnecting = false;
-                if ($self->queryMysql === $fresh) {
-                    $self->queryMysql = null;
-                }
-                // 队首在此次建连失败中终结：出队后报错，避免 drain 反复重建同一查询
-                array_shift($self->queryQueue);
-                $self->sendError($id, $code, $message);
-                $self->drainQueryQueue();
-            }
+            $timeout
         );
+        $this->queryMysql = $fresh;
+        if ($ok) {
+            $this->queryConnecting = false;
+            array_shift($this->queryQueue);
+            $fresh->query(
+                $sql,
+                function (array $result) use ($self, $id): void {
+                    $colOut = [];
+                    foreach (($result['columns'] ?? []) as $col) {
+                        $colOut[] = [
+                            'name' => (string) ($col['name'] ?? ''),
+                            'type' => (string) ($col['type'] ?? ''),
+                        ];
+                    }
+                    $self->sendFrame($id, 'query-result', [
+                        'columns' => $colOut,
+                        'rows' => $result['rows'] ?? [],
+                    ]);
+                    $self->drainQueryQueue();
+                },
+                function (int $code, string $message) use ($self, $id): void {
+                    $self->sendError($id, $code, $message);
+                    $self->drainQueryQueue();
+                }
+            );
+            return;
+        }
+        // 建连失败
+        $this->queryConnecting = false;
+        array_shift($this->queryQueue);
+        $self->sendError($id, 1002, '查询连接失败（krowinski 适配器）');
+        $self->drainQueryQueue();
     }
 
     private function handleClose(): void

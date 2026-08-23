@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace DmsAgent;
 
-use DmsAgent\Mysql\AsyncClient;
+use DmsAgent\Mysql\KrowinskiQueryAdapter;
 
 /**
  * MetaGatherer — 连接成功后异步采集 binlog 元数据
@@ -12,7 +12,7 @@ use DmsAgent\Mysql\AsyncClient;
  */
 final class MetaGatherer
 {
-    private AsyncClient $mysql;
+    private KrowinskiQueryAdapter $mysql;
     private int $serverId;
 
     /** @var array<string, mixed> */
@@ -24,7 +24,7 @@ final class MetaGatherer
     /** @var callable|null (array $meta) */
     private $onDone = null;
 
-    public function __construct(AsyncClient $mysql, int $serverId)
+    public function __construct(KrowinskiQueryAdapter $mysql, int $serverId)
     {
         $this->mysql = $mysql;
         $this->serverId = $serverId;

@@ -63,7 +63,14 @@ PDO SHOW BINARY LOGS（按名升序 binlog.000040 < ... < 000042，末个=当前
   `.filter-bar .field { min-width:0; margin-bottom:0; }` + `.filter-bar .field-error { display:none; }`
   并用注释标明是有意覆盖（防御未来"清理无意义规则"误删）。
 - 验证：`evaluate_script` 测得四子元素 centerY 全部为 123（修复前 131/123 两种），`.filter-bar` 高从 72px 降到 26px。
-- 附带发现（未处理）：表名下拉显示 `shop.全部` 而非真实表名，源自 mock-agent 的 table 字段异常，非本次诉求。
+- `frontend/src/pages/ConnectPage.tsx` `runSaved()`：`useDemo: false`（已修复）——已存真实连接点击后强制真实代理，不再残留演示模式状态
+
+## 本轮发现（MySQL 认证 + 前端状态清理）
+- `AsyncClient` 的 `mysql_native_password` 认证在 `MySQL 5.7.43` + `mysql_native_password` 插件下仍然 `1045`（`krowinski` 同服务器认证通过 → 证明不是服务器限制，而是 `AsyncClient` 协议实现缺陷）
+- `agent-workerman` 的真实 `binlog-dump` 本就不依赖 `mysql` 主连接（走 `krowinski_dump.php` 子进程 + `proc_open`），因此可安全将 `mysql` 主连接也替换为 `KrowinskiQueryAdapter`
+- `adapter` 连接成功后 `MetaGatherer` 执行 `SHOW MASTER STATUS` 正常返回（`File` + `Position`），`serverVersion` 正常（`5.7.43-log`），`userPrivileges` 正常（`SELECT` + `REPLICATION SLAVE` + `REPLICATION CLIENT`）
+- 前端 `undefined` 下拉：源自 `adapter` `columns` 一直为空数组（`fetchAllAssociative()` 结果没有被正确解析为列名）→ 改 `PDO::FETCH_NUM` + `getColumnMeta()` 提取列名后修复
+- 前端 `runSaved()` 保留 `useDemo` 状态：点击已保存真实连接时仍走演示路径，`checkResult` 不清空，`开始追踪` 按钮被 `blocking` 禁用 → 改 `useDemo: false` 后修复
 
 ## 已存连接同名覆盖（2026-08-23）
 - `ConnectPage.doConnect` 每次 `newId()` → `upsertConnection` 以 id 为键 → `findIndex` 永远 -1 → 永远 `unshift`，

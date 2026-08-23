@@ -70,6 +70,9 @@ use MySQLReplication\MySQLReplicationFactory;
 
 function emit(array $row): void
 {
+    static $startTime = null;
+    if ($startTime === null) $startTime = microtime(true);
+    $elapsed = (microtime(true) - $startTime) * 1000; // ms since first emit
     $json = json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($json === false) {
         fwrite(STDERR, 'krowinski_dump: json_encode 失败: ' . json_last_error_msg() . "\n");
@@ -77,6 +80,7 @@ function emit(array $row): void
     }
     fwrite(STDOUT, $json . "\n");
     flush();
+    fwrite(STDERR, 'krowinski_dump: emit #' . ($row['xid'] ?? 0) . ' kind=' . ($row['kind'] ?? '?') . ' ts=' . ($row['timestamp'] ?? 0) . ' elapsed_ms=' . round($elapsed, 1) . "\n");
 }
 
 function probeStartFile(string $host, int $port, string $user, string $password, int $startTs): array

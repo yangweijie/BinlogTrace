@@ -1,7 +1,0 @@
----------------------------------------------- WORKERMAN -----------------------------------------------
-Workerman/5.2.2         PHP/8.4.16 (JIT off)          Windows NT/10.0
------------------------------------------------ WORKERS ------------------------------------------------
-worker                                          listen                              processes   status
-dms-agent                                       websocket://0.0.0.0:25127           1           [ok]
-[agent-workerman] 监听 websocket://0.0.0.0:25127 (协议 v2)
-[agent-workerman] 提示: 无内置认证，仅限内网使用
