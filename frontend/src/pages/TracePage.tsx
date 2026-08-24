@@ -61,6 +61,11 @@ export default function TracePage() {
     if (end === '') setEnd(hoursAgo(0));
   }, [end]);
 
+  useEffect(() => {
+    if (db) void schema.loadTables(db);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const onDbChange = (value: string): void => {
     setDb(value);
     setTable(ALL_TABLE);

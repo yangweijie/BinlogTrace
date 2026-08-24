@@ -1,0 +1,26 @@
+{
+    "name": "dms/agent",
+    "description": "轻量 TypePHP 风格 CLI + 原生 HTTP 服务，承载 MySQL binlog 追踪代理（不依赖 workerman / thinkphp）",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.1",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*",
+        "ext-sockets": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "DmsAgent\\": "src/"
+        }
+    },
+    "scripts": {
+        "post-autoload-dump": []
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "krowinski/php-mysql-replication": true
+        }
+    }
+}

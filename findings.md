@@ -85,3 +85,23 @@ PDO SHOW BINARY LOGS（按名升序 binlog.000040 < ... < 000042，末个=当前
   `binlog_row_metadata=MINIMAL`（krowinski 回退 information_schema 取列名）。
 - 用户实际改的是 `test.order`；Vite dev 5173；Node v24.10.0；tpc 在
   `/d/git/php/tpc_v1113_windows_x86_64/tpc`（PE32+ x86-64, php 8.4）——有依赖障碍，故未走 WASM 重建。
+
+## 原生 agent/ 路径（2026-08-24，TypePHP 编译目标）
+
+### AgentHandler::handleDump 契约（agent/src/AgentHandler.php:168-314）
+- spawn 脚本 `__DIR__.'/../bin/mysqlbinlog_dump.php`；CLI：`--host --port --user --file <binlogFile> --pos <pos>` + 条件 `--start-ts <sec>`(startMs/1000>0) + `--end-ts <sec>`(endMs/1000>0)。密码经 ENV `DMS_MYSQL_PASSWORD`；cwd=`agent/`；stdout(1)/stderr(2) pipe w。
+- stdout 逐行 JSON：`onDumpReadable` 仅转发 `type==='change'` 行 → `binlog-change` 帧（字段 kind,schema,table,columns,primaryKeys,before,after,xid,timestamp,binlogFile,binlogPos）；其他 type（如 heartbeat）忽略。
+- exit 0 → `binlog-end{exitCode:0}`；非 0 → error code INTERNAL_ERROR「binlog 解析进程异常退出 code=N」+ stderr 尾部 300 字。
+- `dump-started` 帧显示的是 AgentHandler 在 spawn 前从 MetaGatherer 取的**当前尾巴位置**（mysql-bin.000005/1365），**非**实际起点；实际起点由 worker 内部 `probeStartFile` 决定，看 `[dump-err]` 日志。
+
+### mysqlbinlog CLI 在本机不可行
+- 本机 `mysqlbinlog`（MySQL 9.4.0）已移除 `mysql_native_password` 客户端插件 → 连远程 5.7 报 `Authentication plugin 'mysql_native_password' cannot be loaded: dlopen(.../mysql_native_password.so... no such file)` → worker code=1、AgentHandler 报 code 1099。
+- 故将 `agent/bin/mysqlbinlog_dump.php` 整体改为纯 PHP `krowinski/php-mysql-replication`（与 agent-workerman 同源），不再依赖任何本地二进制，TypePHP 打包后无外部依赖。
+
+### krowinski 在 agent/vendor 已可直接 autoload
+- `php -r "require 'vendor/autoload.php'; var_dump(class_exists('MySQLReplication\\MySQLReplicationFactory'));"` → `bool(true)`；`agent/composer.json` require 仅 php/ext-pdo*/ext-sockets，但 vendor 内已装且 autoload 含 krowinski，**无需改 composer.json**。
+- 目标 MySQL 5.7 用 mysql_native_password，krowinski 自实现 socket 支持；仅 MySQL 8.4+/9（仅 caching_sha2）曾握手失败（Got packets out of order），与本目标无关。
+
+### 历史窗起点定位（worker 内，复刻 agent-workerman）
+- `SHOW BINARY LOGS`（PDO）→ `array_reverse` 从新到旧 → 逐文件 krowinski 从 pos 4 取首个行事件 ts → 首个 `ts < startTs` 的文件为起点（pos 4 起，窗口前行被 start-ts 过滤，无遗漏）；全部文件首事件 ≥ startTs → 回退最旧文件。
+- 主 `MySQLReplicationFactory` 经 ROTATE 续读后续文件；`onXID` 缓冲赋 xid 并作时间窗过滤与越界 `exit(0)`（加 `timestamp>0` 守卫防 ts=0 误杀）；`onHeartbeat` 用本地墙钟 `time()>$endTs+5` 兜底退出。

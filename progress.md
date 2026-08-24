@@ -35,3 +35,44 @@
 - `agent-workerman` 运行中（`PID 73064`，`0.0.0.0:8080`）
 - `frontend` 已重建并重新提供（`python -m http.server 5173 --directory frontend/dist`）
 - `binlog_format=ROW` 已由用户确认；`log_bin=ON`、`server_id=1`、`MASTER STATUS` 正常（`mysql-bin.000004` @ `154`）
+
+## Session 2026-08-24（原生 agent/ TypePHP 目标：连接 + 历史窗追踪修复）
+
+### 已完成（前端 + 原生 agent 双修）
+- [x] `agent/src/Router.php`：v2 信封归一化（从 `$raw['payload']` 抽出 payload/frameId），修 `connect 'host 不能为空' (1008)`
+- [x] `frontend/src/types/api.d.ts` + `frontend/src/hooks/useSchemaMeta.ts`：query 结果 `rows` 改 `Record<string,unknown>[]`，按 `columns[0].name` 读列值，修数据库/数据表下拉 `undefined`
+- [x] `frontend/src/lib/check-cfg.ts`：`meta.userPrivileges` 用 `satisfiesPrivilege`（词边界正则，ALL PRIVILEGES 满足全部）替换精确 `includes`，修权限误报
+- [x] `frontend/src/pages/TracePage.tsx`：挂载时若已有持久化预选库则主动 `loadTables(db)`（原仅 `onDbChange` 触发），修「表列表为空」
+- [x] `agent/src/Server.php`：`/dump` 的 `stream_select` 崩溃（ended 清理漏 stderr fd + 未过滤非 resource）→ 修
+- [x] `agent/bin/mysqlbinlog_dump.php`：透传真实 `proc_get_status exitcode`（不再恒 `exit(0)`），避免掩盖 worker 失败
+- [x] `agent/src/ClientConn.php`：`beginSse()` 加 CORS 头（前端 :5173 → agent :8080 跨域），修 `/dump` CORS 错误
+- [x] `agent/bin/mysqlbinlog_dump.php`（历史窗）：复刻 krowinski 版 `probeStartFile`（新→旧定位首事件 ts<startTs 文件，pos 4 起）+ `--to-last-log` → 修「24h 追踪 0 变更」
+- [x] `agent/bin/mysqlbinlog_dump.php`：`probeOne` descriptors 补 stdin（修 fclose(NULL) 致命）；主命令补 `--to-last-log`（跨文件续读）
+- [x] `agent/bin/mysqlbinlog_dump.php`：心跳退出加 `$gotData` 闸门（mysqlbinlog 连接建立 >1s 无数据期间不按墙钟自杀）→ 修「仍 0 变更」
+- [x] `agent/bin/mysqlbinlog_dump.php`：**整体改为纯 PHP krowinski/php-mysql-replication**（不再 shell-out 本地 mysqlbinlog），消除 MySQL 9.4 缺 `mysql_native_password` 客户端插件导致的 code=1/1099；与 `AgentHandler::handleDump` 契约一致（CLI getopt、ENV 密码、stdout `{"type":"change",...}`）
+
+### 关键决策
+- 原生 `agent/` 的 binlog 解析从「本地 `mysqlbinlog` CLI」切换为「纯 PHP krowinski」，理由：① 用户明确要求打包后不依赖本地二进制；② 本机 mysqlbinlog(9.4) 缺 mysql_native_password 插件连不上远程 5.7；③ 与 agent-workerman 同源实现一致。krowinski 已在 `agent/vendor` 可直接 autoload（无需改 composer.json）。
+
+### 遇到的错误与解决方案（本轮）
+| 错误 | 根因 | 解决方案 |
+|------|------|----------|
+| connect 'host 不能为空' (1008) | Router 未归一化 v2 信封 | 抽出 payload/frameId |
+| 数据库/数据表下拉 undefined | rows 当数组、列名取 r[0] | 改 Record + 按 columns[0].name 读 |
+| 权限误报 | 精确 includes 匹配 GRANT 串 | satisfiesPrivilege 词边界 |
+| /dump stream_select 崩溃 | ended 未清 stderr fd + 未过滤非 resource | 加 errKeys 清理 + array_filter resource |
+| /dump CORS 错误 | beginSse 无跨域头 | 加 Access-Control-* |
+| 24h 追踪 0 变更 | 从当前尾巴 pos 读（后面无事件） | probeStartFile 定位起点文件 pos 4 + --to-last-log |
+| probeOne 致命 fclose(NULL) | descriptors 缺 stdin | 补 0=>pipe r |
+| 仍 0 变更 | 心跳在 mysqlbinlog 连接间隙按墙钟自杀 | $gotData 闸门 |
+| worker code=1 / 1099 | 本机 mysqlbinlog(9.4) 缺 mysql_native_password 插件 | 改用纯 PHP krowinski |
+
+### 验证
+- 后端实测：数据库 `[information_schema,jay_music,mysql,performance_schema,sys]`、jay_music 表 `[musics,playlist]` 正确返回；root 连接/query 正常
+- 前端 `npm run type-check` 通过
+- `php -l agent/bin/mysqlbinlog_dump.php` 通过
+- **待用户真实环境复测**：24h 追踪应不再报 code=1099，worker 从定位起点文件沿 binlog 链读、过滤 jay_music 窗口内变更逐条下发
+
+### 关键文件改动
+- `agent/src/Router.php`、`agent/src/Server.php`、`agent/src/ClientConn.php`、`agent/bin/mysqlbinlog_dump.php`
+- `frontend/src/hooks/useSchemaMeta.ts`、`frontend/src/types/api.d.ts`、`frontend/src/lib/check-cfg.ts`、`frontend/src/pages/TracePage.tsx`

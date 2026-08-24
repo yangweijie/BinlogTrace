@@ -57,7 +57,16 @@ export function checkBinlogCfg(meta: CheckMetaInput): CheckResult {
     });
   }
 
-  const missing = REQUIRED_PRIVS.filter((p) => !meta.userPrivileges.includes(p));
+  // userPrivileges 是原始 GRANT 语句（如 "GRANT SELECT, REPLICATION SLAVE,
+  // REPLICATION CLIENT ON *.* TO 'u'@'%'" 或 "GRANT ALL PRIVILEGES ..."），
+  // 不能做整串相等匹配，需逐权限判断其是否出现在任一授权语句中。
+  const satisfiesPrivilege = (priv: string): boolean =>
+    meta.userPrivileges.some((g) => {
+      if (/ALL PRIVILEGES/i.test(g)) return true;
+      const escaped = priv.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`\\b${escaped}\\b`, 'i').test(g);
+    });
+  const missing = REQUIRED_PRIVS.filter((p) => !satisfiesPrivilege(p));
   if (missing.length > 0) {
     errors.push({
       code: 1004,

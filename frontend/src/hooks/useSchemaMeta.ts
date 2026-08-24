@@ -41,7 +41,10 @@ export function useSchemaMeta(demoMode: boolean) {
     }
     try {
       const res = await session.query<QueryResultPayload>('SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA ORDER BY SCHEMA_NAME');
-      const dbs = res.rows.map((r: unknown[]) => String(r[0])).filter((n: string) => !['information_schema', 'performance_schema', 'mysql', 'sys'].includes(n));
+      const colName = res.columns[0]?.name ?? 'SCHEMA_NAME';
+      const dbs = res.rows
+        .map((r) => String(r[colName] ?? ''))
+        .filter((n) => n !== '' && !['information_schema', 'performance_schema', 'mysql', 'sys'].includes(n));
       setDbOptions(dbs.map((d) => ({ value: d, label: d })));
       if (dbs.length === 0) {
         setError('当前账号无权限查看数据库列表，请确认已授予 SELECT 权限。');
@@ -72,7 +75,13 @@ export function useSchemaMeta(demoMode: boolean) {
         `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='${dbName.replace(/'/g, "''")}' ORDER BY TABLE_NAME`,
         dbName,
       );
-      setTableOptions(res.rows.map((r: unknown[]) => String(r[0])).map((t: string) => ({ value: t, label: t })));
+      const colName = res.columns[0]?.name ?? 'TABLE_NAME';
+      setTableOptions(
+        res.rows
+          .map((r) => String(r[colName] ?? ''))
+          .filter((t) => t !== '')
+          .map((t) => ({ value: t, label: t })),
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : '数据表列表加载失败');
     } finally {

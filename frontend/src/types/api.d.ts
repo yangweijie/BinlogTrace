@@ -99,7 +99,7 @@ export interface QueryPayload {
 /** query-result 载荷 */
 export interface QueryResultPayload {
   columns: Array<{ name: string; type: string }>;
-  rows: unknown[][];
+  rows: Array<Record<string, unknown>>;
   affectedRows?: number;
 }
 

@@ -59,6 +59,19 @@
   - [x] 已存连接同名覆盖：`ConnectPage.doConnect` 按 `name` 复用已有 `id`，消除 `upsertConnection`
         永远 `unshift` 的同名堆积
 
+- [x] **Phase F — 原生 agent/（TypePHP 编译目标）链路修复**（本轮，已完成）
+  - [x] `Router` v2 信封归一化（修 connect 'host 不能为空' 1008）
+  - [x] 前端 query 结果 `rows` 改 `Record<string,unknown>[]`、按 `columns[0].name` 读列值（修数据库/数据表下拉 `undefined`）
+  - [x] `check-cfg` 权限改 `satisfiesPrivilege` 词边界匹配（修误报）
+  - [x] `TracePage` 挂载时若已持久化预选库则主动 `loadTables(db)`（修表列表空）
+  - [x] `/dump` `Server.php` 的 `stream_select` 崩溃（ended 清理漏 stderr fd + 未过滤非 resource）修复
+  - [x] `mysqlbinlog_dump.php` 透传真实 `proc_get_status` exitcode（不再恒 `exit(0)` 掩盖失败）
+  - [x] `ClientConn::beginSse()` 加 CORS 头（修前端 :5173 → agent :8080 跨域 /dump 错误）
+  - [x] 历史窗 `probeStartFile` 起点定位（新→旧取首事件 ts<startTs 文件，pos 4 起）+ `--to-last-log`（修 24h 0 变更）
+  - [x] `probeOne` descriptors 补 stdin（修 fclose(NULL) 致命）；主命令补 `--to-last-log`（跨文件续读）
+  - [x] 心跳退出加 `$gotData` 闸门（mysqlbinlog 连接间隙 >1s 无数据不按墙钟自杀）
+  - [x] **binlog 解析整体改为纯 PHP krowinski/php-mysql-replication**（替代本地 mysqlbinlog CLI；消除 9.4 缺 mysql_native_password 插件导致的 code=1/1099），与 `AgentHandler::handleDump` 契约一致
+
 ## Decisions
 | # | Decision | Rationale |
 |---|----------|-----------|
@@ -67,6 +80,7 @@
 | 3 | 起点文件定位放 worker 内（非 AsyncClient peek） | AsyncClient 是单连接，无法并发 peek；探测属 binlog 领域逻辑，内聚在 worker |
 | 4 | 不做文件内二分定位 | 多读部分被 start-ts 过滤，无正确性影响；仅历史很旧时稍慢 |
 | 5 | 心跳兜底用本地 `time()` | krowinski 心跳 `eventInfo->timestamp` 恒为 0（库实现），不可用于比较 |
+| 6 | 原生 agent binlog 解析改用纯 PHP krowinski（替代本地 mysqlbinlog） | 用户要求打包后不依赖本地二进制；本机 mysqlbinlog(9.4) 缺 mysql_native_password 插件连不上远程 5.7；与 agent-workerman 同源一致 |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
@@ -80,6 +94,8 @@
 | binlogFile 含 CRC 尾部 → 无输出 | 1 | 剥离 CRC 尾部并修正 eventSize |
 | 结果页筛选栏子元素高度差 28px+ | 1 | `Select` 空 `.field-error` 占位 + `.field` column 布局 → 局部覆盖 |
 | 同名连接反复保存堆积多条 | 1 | `doConnect` 每次 `newId()` → `upsertConnection` 永远 `unshift` → 先按 name 复用 id |
+| 24h 追踪 0 变更（从当前尾巴 pos 读） | 3 | `probeStartFile` 定位起点文件 pos4 + `--to-last-log` |
+| worker code=1 / 1099（mysql_native_password 插件缺失） | 1 | 改纯 PHP krowinski，不再 shell-out 本地 mysqlbinlog |
 
 ## Verification
 - worker 独立探测（startTs=1787414500）：定位 binlog.000042，窗口内 2 条变更（NEWDECIMAL/DATETIME2 值正确）
