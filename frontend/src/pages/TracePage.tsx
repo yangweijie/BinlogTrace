@@ -96,8 +96,12 @@ export default function TracePage() {
   const validateRange = (): boolean => {
     const s = parseLocal(start).getTime();
     const e = parseLocal(end).getTime();
-    if (!(e > s) || e - s > 48 * 3600_000) {
-      setRangeError('时间范围无效：结束时间必须晚于开始时间，且跨度不超过 48 小时。');
+    if (!(e > s)) {
+      setRangeError('结束时间必须晚于开始时间。');
+      return false;
+    }
+    if (e - s > 48 * 3600_000) {
+      setRangeError('时间跨度不能超过 48 小时。');
       return false;
     }
     setRangeError('');
