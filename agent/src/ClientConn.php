@@ -21,6 +21,10 @@ final class ClientConn
     private bool $dispatched = false;
     /** dump SSE 关联的业务 handler（用于 dump 结束后关闭连接） */
     public ?AgentHandler $owner = null;
+    /** 标准 CORS 响应头（短响应默认带上，避免浏览器拦截跨域） */
+    private array $cors;
+    /** 所属 Server（用于把 dump 管道注册到事件循环） */
+    private ?Server $server = null;
 
     public function markDispatched(): void
     {
@@ -34,8 +38,20 @@ final class ClientConn
 
     public function __construct(
         private $stream,
-        private string $peer
+        private string $peer,
+        ?Server $server = null
     ) {
+        $this->server = $server;
+        $this->cors = [
+            'Access-Control-Allow-Origin' => '*',
+            'Access-Control-Allow-Methods' => 'POST, OPTIONS',
+            'Access-Control-Allow-Headers' => 'Content-Type',
+        ];
+    }
+
+    public function corsHeaders(): array
+    {
+        return $this->cors;
     }
 
     public function stream()
@@ -119,12 +135,13 @@ final class ClientConn
         return $this->request;
     }
 
-    /** 短响应（connect/query/close） */
-    public function respond(string $body, array $headers, int $code = 200): void
+    /** 短响应（connect/query/close）。headers 缺省为 CORS 头。 */
+    public function respond(string $body, ?array $headers = null, int $code = 200): void
     {
         if ($this->sse) {
             return;
         }
+        $headers = $headers ?? $this->cors;
         $map = [
             200 => '200 OK',
             204 => '204 No Content',
@@ -169,6 +186,14 @@ final class ClientConn
             return;
         }
         @fwrite($this->stream, $sseLine);
+    }
+
+    /** 把 dump 子进程 stdout 管道注册到 Server 事件循环（由 AgentHandler 调用） */
+    public function registerDumpPipe($pipe): void
+    {
+        if ($this->server !== null) {
+            $this->server->registerDumpPipe($pipe, $this->owner);
+        }
     }
 
     public function close(): void

@@ -1,0 +1,7 @@
+name: binlog-agent
+mode: bin
+output: binlog-agent
+sources:
+  - src
+ext-deps:
+  - pdo_mysql

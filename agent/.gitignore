@@ -1,1 +1,4 @@
 /build/
+/binlog_agent.exe
+/binlog_agent.exp
+/binlog_agent.lib

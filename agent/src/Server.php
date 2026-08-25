@@ -78,7 +78,7 @@ final class Server
         }
         // 仅保留合法流资源：若某个 fd（如已退出的 dump 子进程管道）残留为失效资源，
         // 过滤掉，避免 stream_select 对失效资源抛错使整个服务崩溃。
-        $read = array_values(array_filter($read, static fn($r) => is_resource($r)));
+        $read = $this->filterReadable($read);
 
         $write = [];
         $except = [];
@@ -95,7 +95,7 @@ final class Server
             if (is_resource($conn)) {
                 stream_set_blocking($conn, false);
                 $id = (int) $conn;
-                $this->clients[$id] = new ClientConn($conn, $peer);
+                $this->clients[$id] = new ClientConn($conn, $peer, $this);
             }
         }
 
@@ -173,29 +173,36 @@ final class Server
     {
         $req = $c->request();
         $router = new Router();
-        $router->handle($req, function (string $body, array $headers, int $code = 200) use ($c) {
-            $c->respond($body, $headers, $code);
-        }, function (AgentHandler $handler) use ($c) {
-            // dump SSE 设置：进入 SSE 模式 + 注入写出回调 + 注册子进程管道到事件循环
-            $c->beginSse();
-            $handler->setSseWriter(function (string $sseLine) use ($c) {
-                $c->writeSse($sseLine);
-            });
-            $c->owner = $handler;
-            $handler->setPipeRegister(function ($pipe) use ($handler) {
-                if (!is_resource($pipe)) {
-                    return;
-                }
-                $fdKey = (int) $pipe;
-                $this->pipeFds[$fdKey] = $pipe;
-                $this->dumpPipes[$fdKey] = $handler;
-                $err = $handler->dumpErrPipe();
-                if (is_resource($err)) {
-                    $errKey = (int) $err;
-                    $this->errFds[$errKey] = $err;
-                    $this->errKeys[$fdKey] = $errKey;
-                }
-            });
-        });
+        $router->handle($req, $c);
+    }
+
+    /**
+     * 由 ClientConn::registerDumpPipe 转发调用：把 dump 子进程管道注册到事件循环。
+     */
+    public function registerDumpPipe($pipe, ?AgentHandler $handler): void
+    {
+        if (!is_resource($pipe) || $handler === null) {
+            return;
+        }
+        $fdKey = (int) $pipe;
+        $this->pipeFds[$fdKey] = $pipe;
+        $this->dumpPipes[$fdKey] = $handler;
+        $err = $handler->dumpErrPipe();
+        if (is_resource($err)) {
+            $errKey = (int) $err;
+            $this->errFds[$errKey] = $err;
+            $this->errKeys[$fdKey] = $errKey;
+        }
+    }
+
+    private function filterReadable(array $read): array
+    {
+        $out = [];
+        foreach ($read as $r) {
+            if (is_resource($r)) {
+                $out[] = $r;
+            }
+        }
+        return array_values($out);
     }
 }

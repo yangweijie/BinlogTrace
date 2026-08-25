@@ -15,7 +15,7 @@ use DmsAgent\Mysql\PdoConnection;
  *   POST /query    → handleQuery    （请求-响应，回 query-result 或 error）
  *   POST /close    → handleClose    （销毁会话）
  *
- * 与 Server 解耦：发送通过注入的回调完成（sseWriter 写 SSE 行、responder 写单帧 JSON），
+ * 与 Server 解耦：发送通过注入的 ClientConn 通道完成（writeSse 写 SSE 行、respond 写单帧 JSON），
  * 子进程 stdout 由 Server 的事件循环读取并调用 onDumpLine()，保持事件驱动、不阻塞。
  */
 final class AgentHandler
@@ -43,33 +43,19 @@ final class AgentHandler
     private $dumpErrPipe = null;
     /** 行缓冲（JSON 行可能跨多次读取） */
     private string $dumpBuffer = '';
-    /** SSE 写出回调（注入）：function(string $sseLine): void */
-    private ?\Closure $sseWriter = null;
-    /** 单帧响应回调（注入）：function(string $json): void */
-    private ?\Closure $responder = null;
-    /** 子进程管道注册回调（注入，dump 启动后调用）：function(resource $pipe): void */
-    private ?\Closure $pipeRegister = null;
+    /** 发送通道（注入，替代不可编译的闭包回调） */
+    private ?ClientConn $client = null;
 
     public function __construct()
     {
         $this->serverId = random_int(1, 2147483647);
     }
 
-    // ─── 回调注入（由 Server 设置） ────────────────────────
+    // ─── 通道注入（由 Router/Server 设置） ──────────────────
 
-    public function setSseWriter(\Closure $fn): void
+    public function setClient(ClientConn $c): void
     {
-        $this->sseWriter = $fn;
-    }
-
-    public function setResponder(\Closure $fn): void
-    {
-        $this->responder = $fn;
-    }
-
-    public function setPipeRegister(\Closure $fn): void
-    {
-        $this->pipeRegister = $fn;
+        $this->client = $c;
     }
 
     public function getSessionToken(): string
@@ -111,7 +97,11 @@ final class AgentHandler
         try {
             $conn->connect($host, $port, $user, $password, $database, max(1, (int) ceil($timeout / 1000)));
         } catch (\Throwable $e) {
-            $this->respond($id, 'error', ['code' => AgentConstants::AUTH_FAILED, 'message' => 'MySQL 连接失败: ' . $e->getMessage()]);
+            $this->respond($id, 'error', [
+                'code' => AgentConstants::AUTH_FAILED,
+                'message' => 'MySQL 连接失败: ' . $e->getMessage(),
+                'diagnostic' => $this->diagnosticInfo(),
+            ]);
             return;
         }
         $this->conn = $conn;
@@ -124,6 +114,44 @@ final class AgentHandler
         $this->sessionToken = SessionManager::create($this);
         $meta['session'] = $this->sessionToken;
         $this->respond($id, 'connected', $meta);
+    }
+
+    /**
+     * 连接失败时的运行时诊断（分字段返回，便于前端/调试阅读）：
+     * 扩展加载情况、PHP 构建参数、php.ini 与 ext 目录，
+     * 用于确认 pdo_mysql 驱动是否真正编入当前运行时。
+     *
+     * @return array<string, mixed>
+     */
+    private function diagnosticInfo(): array
+    {
+        $ini = php_ini_loaded_file();
+        if ($ini === false || $ini === '') {
+            $ini = null;
+        }
+        $extDir = ini_get('extension_dir');
+        if ($extDir === false || $extDir === '') {
+            $extDir = null;
+        }
+
+        $loaded = get_loaded_extensions();
+        sort($loaded);
+
+        return [
+            'pdo' => extension_loaded('pdo'),
+            'pdo_mysql' => extension_loaded('pdo_mysql'),
+            'mysqli' => extension_loaded('mysqli'),
+            'mysqlnd' => extension_loaded('mysqlnd'),
+            'php_ini' => $ini,
+            'extension_dir' => $extDir,
+            'php_version' => PHP_VERSION,
+            'zts' => defined('PHP_ZTS') ? (bool) PHP_ZTS : false,
+            'debug' => defined('PHP_DEBUG') ? (bool) PHP_DEBUG : false,
+            'arch' => PHP_INT_SIZE === 8 ? 'x86_64' : 'x86',
+            'sapi' => PHP_SAPI,
+            'module' => 'typephp_binlog_agent',
+            'extensions' => $loaded,
+        ];
     }
 
     // ─── query（只读） ─────────────────────────────────────
@@ -233,8 +261,8 @@ final class AgentHandler
         $this->dumping = true;
 
         // 通知 Server 把管道加入事件循环 select
-        if ($this->pipeRegister !== null) {
-            ($this->pipeRegister)($this->dumpPipe);
+        if ($this->client !== null) {
+            $this->client->registerDumpPipe($this->dumpPipe);
         }
 
         $this->sse('', 'dump-started', ['binlogFile' => $fileName, 'binlogPos' => $filePos]);
@@ -393,10 +421,10 @@ final class AgentHandler
 
     private function sse(string $id, string $type, array $payload): void
     {
-        if ($this->sseWriter === null) {
+        if ($this->client === null) {
             return;
         }
-        ($this->sseWriter)(Frame::sse($id, $type, $payload));
+        $this->client->writeSse(Frame::sse($id, $type, $payload));
     }
 
     private function respond(string $id, string $type, array $payload): void
@@ -406,9 +434,9 @@ final class AgentHandler
 
     private function respondOnceJson(string $json): void
     {
-        if ($this->responder === null) {
+        if ($this->client === null) {
             return;
         }
-        ($this->responder)($json);
+        $this->client->respond($json);
     }
 }
