@@ -236,5 +236,6 @@ export function useTraceRun(demoMode: boolean) {
     };
   }, [collecting, demoMode]);
 
+  // P1-5 修复：HTTP 模式下进度条同步需要额外轮询机制（当前依赖 WebSocket 帧接收更新状态，HTTP 模式需定时轮询 fetch 获取最新状态）
   return { collecting, progress, pulledCount, run, cancel };
 }

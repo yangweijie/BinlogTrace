@@ -267,3 +267,12 @@
   color: var(--color-textSecondary);
 }
 
+
+/* P2-7 修复：响应式布局适配（移动设备模式） */
+@media (max-width: 640px) {
+  .card { padding: var(--spacing-sm); }
+  .btn { height: 32px; font-size: var(--fs-small); }
+  .field { margin-bottom: var(--spacing-xs); }
+  .topbar { height: 48px; padding: 0 var(--spacing-sm); }
+  .filter-bar { flex-wrap: wrap; gap: var(--spacing-xs); }
+}
