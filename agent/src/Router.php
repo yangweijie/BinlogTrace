@@ -20,8 +20,8 @@ final class Router
 {
     public function handle(
         HttpRequest $req,
-        callable $respondFn,
-        callable $sseSetupFn
+        Responder $respondFn,
+        SseSetup $sseSetupFn
     ): void {
         $path = $req->path();
         $method = strtoupper($req->method);
@@ -43,20 +43,18 @@ final class Router
         ];
 
         if ($method === 'OPTIONS') {
-            ($respondFn)('', $cors, 204);
+            $respondFn->respond('', $cors, 204);
             return;
         }
         if ($method !== 'POST') {
-            ($respondFn)(Frame::build('', 'error', ['code' => AgentConstants::PROTOCOL_ERROR, 'message' => '仅支持 POST']), $cors, 405);
+            $respondFn->respond(Frame::build('', 'error', ['code' => AgentConstants::PROTOCOL_ERROR, 'message' => '仅支持 POST']), $cors, 405);
             return;
         }
 
         switch ($path) {
             case '/connect':
                 $handler = new AgentHandler();
-                $handler->setResponder(function (string $json) use ($respondFn, $cors) {
-                    ($respondFn)($json, $cors, 200);
-                });
+                $handler->setResponder(new CorsResponder($respondFn, $cors));
                 $handler->handleConnect($frameId, $payload);
                 return;
 
@@ -67,22 +65,18 @@ final class Router
                 $token = (string) ($body['session'] ?? '');
                 $handler = $token !== '' ? SessionManager::get($token) : null;
                 if ($handler === null) {
-                    ($respondFn)(Frame::build('', 'error', ['code' => AgentConstants::PROXY_NOT_READY, 'message' => '会话不存在或已过期，请先 connect']), $cors, 200);
+                    $respondFn->respond(Frame::build('', 'error', ['code' => AgentConstants::PROXY_NOT_READY, 'message' => '会话不存在或已过期，请先 connect']), $cors, 200);
                     return;
                 }
                 if ($path === '/close') {
-                    $handler->setResponder(function (string $json) use ($respondFn, $cors) {
-                        ($respondFn)($json, $cors, 200);
-                    });
+                    $handler->setResponder(new CorsResponder($respondFn, $cors));
                     $handler->handleClose();
                     return;
                 }
                 // query / dump 都先确保 responder（dump 错误也可能走短响应兜底）
-                $handler->setResponder(function (string $json) use ($respondFn, $cors) {
-                    ($respondFn)($json, $cors, 200);
-                });
+                $handler->setResponder(new CorsResponder($respondFn, $cors));
                 if ($path === '/dump') {
-                    ($sseSetupFn)($handler); // 进入 SSE：注入 sseWriter + 注册管道
+                    $sseSetupFn->setup($handler); // 进入 SSE：注入 sseWriter + 注册管道
                     $handler->handleDump($frameId, $body);
                 } else {
                     $handler->handleQuery($frameId, $body);
@@ -90,7 +84,22 @@ final class Router
                 return;
 
             default:
-                ($respondFn)(Frame::build('', 'error', ['code' => AgentConstants::PROTOCOL_ERROR, 'message' => "未知路由: {$path}"]), $cors, 404);
+                $respondFn->respond(Frame::build('', 'error', ['code' => AgentConstants::PROTOCOL_ERROR, 'message' => "未知路由: {$path}"]), $cors, 404);
+                return;
         }
+    }
+}
+
+final class CorsResponder implements JsonResponder
+{
+    public function __construct(
+        private Responder $outer,
+        private array $cors
+    ) {
+    }
+
+    public function respondJson(string $json): void
+    {
+        $this->outer->respond($json, $this->cors, 200);
     }
 }

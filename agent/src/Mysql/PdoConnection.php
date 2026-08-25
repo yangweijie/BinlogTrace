@@ -5,47 +5,58 @@ declare(strict_types=1);
 namespace DmsAgent\Mysql;
 
 /**
- * PdoConnection — 纯 PDO MySQL 连接（跨平台，无 workerman / doctrine 依赖）
+ * PdoConnection — 通过 C++ libmysqlclient 直连 MySQL（绕开 PDO/pdo_mysql 扩展）。
+ * 内部调用 mysqlbox_*.cc（见 mysqlbox.cc）实现连接与查询，避免 Windows tpc 下
+ * 缺失 pdo_mysql 驱动（could not find driver）的问题。
  */
 final class PdoConnection
 {
-    private ?\PDO $pdo = null;
+    /** @var mixed|null C++ MySQLBox 资源 */
+    private $box = null;
     private string $database = '';
 
     public function connect(string $host, int $port, string $user, string $password, string $database, int $timeoutSec): void
     {
-        $dsn = sprintf(
-            'mysql:host=%s;port=%d;%s;charset=utf8mb4',
-            $host,
-            $port,
-            $database !== '' ? 'dbname=' . $database : ''
-        );
-        $opts = [
-            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-            \PDO::ATTR_TIMEOUT => $timeoutSec,
-            \PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4",
-        ];
-        $this->pdo = new \PDO($dsn, $user, $password, $opts);
+        try {
+            $box = mysqlbox_connect($host, $port, $user, $password, $database, $timeoutSec);
+        } catch (\Throwable $e) {
+            $extDir = (string) ini_get('extension_dir');
+            $loaded = function_exists('get_loaded_extensions') ? implode(',', get_loaded_extensions()) : '(n/a)';
+            $msg = 'MySQL 连接失败: ' . $e->getMessage()
+                . ' | ext_dir=' . $extDir
+                . ' loaded=' . $loaded
+                . ' driver=C++ libmysqlclient (no pdo_mysql required)';
+            throw new \RuntimeException($msg, 0, $e);
+        }
+        if ($box === false || $box === null) {
+            throw new \RuntimeException('MySQL 连接失败: mysqlbox_connect returned false');
+        }
+        $this->box = $box;
         $this->database = $database;
     }
 
-    public function pdo(): \PDO
+    /** @return mixed|null */
+    public function box()
     {
-        if ($this->pdo === null) {
-            throw new \RuntimeException('未连接');
-        }
-        return $this->pdo;
+        return $this->box;
     }
 
     public function isConnected(): bool
     {
-        return $this->pdo !== null;
+        return $this->box !== null;
     }
 
     public function database(): string
     {
         return $this->database;
+    }
+
+    public function serverVersion(): string
+    {
+        if ($this->box === null) {
+            return '';
+        }
+        return (string) mysqlbox_server_version($this->box);
     }
 
     /**
@@ -54,29 +65,49 @@ final class PdoConnection
      */
     public function query(string $sql): array
     {
-        $pdo = $this->pdo();
-        $stmt = $pdo->query($sql);
-        if ($stmt === false) {
-            return ['columns' => [], 'rows' => []];
+        if ($this->box === null) {
+            throw new \RuntimeException('未连接');
         }
-        $colCount = $stmt->columnCount();
-        $columns = [];
-        for ($i = 0; $i < $colCount; $i++) {
-            $meta = $stmt->getColumnMeta($i);
-            $columns[] = [
-                'name' => (string) ($meta['name'] ?? 'col' . $i),
-                'type' => (string) ($meta['native_type'] ?? ($meta['type'] ?? '')),
-            ];
+        return mysqlbox_query($this->box, $sql);
+    }
+
+    /**
+     * 取查询首行（关联数组）。
+     * @return array<string, mixed>|null
+     */
+    public function queryRow(string $sql): ?array
+    {
+        $result = $this->query($sql);
+        $rows = $result['rows'] ?? [];
+        return isset($rows[0]) && is_array($rows[0]) ? $rows[0] : null;
+    }
+
+    /**
+     * 取查询某列的所有值。
+     * @return array<int, mixed>
+     */
+    public function fetchColumn(string $sql, int $col = 0): array
+    {
+        $result = $this->query($sql);
+        $rows = $result['rows'] ?? [];
+        $out = [];
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $keys = array_keys($row);
+            if (isset($keys[$col])) {
+                $out[] = $row[$keys[$col]];
+            }
         }
-        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
-        if (!is_array($rows)) {
-            $rows = [];
-        }
-        return ['columns' => $columns, 'rows' => $rows];
+        return $out;
     }
 
     public function close(): void
     {
-        $this->pdo = null;
+        if ($this->box !== null) {
+            mysqlbox_close($this->box);
+            $this->box = null;
+        }
     }
 }

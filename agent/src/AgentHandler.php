@@ -15,8 +15,10 @@ use DmsAgent\Mysql\PdoConnection;
  *   POST /query    → handleQuery    （请求-响应，回 query-result 或 error）
  *   POST /close    → handleClose    （销毁会话）
  *
- * 与 Server 解耦：发送通过注入的回调完成（sseWriter 写 SSE 行、responder 写单帧 JSON），
- * 子进程 stdout 由 Server 的事件循环读取并调用 onDumpLine()，保持事件驱动、不阻塞。
+ * 与 Server 解耦：发送通过注入的回调完成（sseWriter 写 SSE 行、responder 写单帧 JSON）。
+ * dump 由 C++ 层（mysqlbox_dump_start，COM_BINLOG_DUMP + 行事件完整类型还原）在后台线程
+ * 抓取并解析，Server 事件循环按 tick 调用 pollDump() 拉取已解析事件并转 binlog-change 帧，
+ * 保持事件驱动、不阻塞、不依赖子进程/管道。
  */
 final class AgentHandler
 {
@@ -35,20 +37,14 @@ final class AgentHandler
     private int $serverId;
     private string $binlogFile = '';
 
-    /** dump 子进程资源（proc_open 返回） */
-    private $dumpProc = null;
-    /** 子进程 stdout 管道（非阻塞，由 Server 事件循环 select 读取） */
-    private $dumpPipe = null;
-    /** 子进程 stderr 管道 */
-    private $dumpErrPipe = null;
-    /** 行缓冲（JSON 行可能跨多次读取） */
+    /** C++ DumpSession 句柄（mysqlbox_dump_start 返回） */
+    private $dumpHandle = null;
+    /** 行缓冲（保留字段，便于未来扩展） */
     private string $dumpBuffer = '';
-    /** SSE 写出回调（注入）：function(string $sseLine): void */
-    private ?\Closure $sseWriter = null;
-    /** 单帧响应回调（注入）：function(string $json): void */
-    private ?\Closure $responder = null;
-    /** 子进程管道注册回调（注入，dump 启动后调用）：function(resource $pipe): void */
-    private ?\Closure $pipeRegister = null;
+    /** SSE 写出回调（注入） */
+    private ?SseWriter $sseWriter = null;
+    /** 单帧响应回调（注入） */
+    private ?JsonResponder $responder = null;
 
     public function __construct()
     {
@@ -57,19 +53,14 @@ final class AgentHandler
 
     // ─── 回调注入（由 Server 设置） ────────────────────────
 
-    public function setSseWriter(\Closure $fn): void
+    public function setSseWriter(SseWriter $fn): void
     {
         $this->sseWriter = $fn;
     }
 
-    public function setResponder(\Closure $fn): void
+    public function setResponder(JsonResponder $fn): void
     {
         $this->responder = $fn;
-    }
-
-    public function setPipeRegister(\Closure $fn): void
-    {
-        $this->pipeRegister = $fn;
     }
 
     public function getSessionToken(): string
@@ -117,7 +108,7 @@ final class AgentHandler
         $this->conn = $conn;
         $this->connected = true;
 
-        $meta = (new MetaGatherer($conn->pdo(), $this->serverId))->gather();
+        $meta = (new MetaGatherer($conn, $this->serverId))->gather();
         if (($meta['hasBinlog'] ?? false) === true) {
             $this->binlogFile = (string) ($meta['binlogFile'] ?? '');
         }
@@ -184,133 +175,73 @@ final class AgentHandler
             return;
         }
         $startTs = (int) ($payload['startMs'] ?? 0) > 0 ? intdiv((int) $payload['startMs'], 1000) : 0;
-        $endTs = (int) ($payload['endMs'] ?? 0) > 0 ? intdiv((int) $payload['endMs'], 1000) : 0;
+        $endTs = (int) ($payload['endMs'] ?? 0) > 0 ? intdiv((int) $payload['endTs'], 1000) : 0;
 
-        $worker = __DIR__ . '/../bin/mysqlbinlog_dump.php';
-        if (!is_file($worker)) {
-            $this->sse($id, 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => 'krowinski 解析脚本缺失']);
-            return;
-        }
-
-        $env = array_merge(getenv(), ['DMS_MYSQL_PASSWORD' => $this->mysqlPassword]);
-        $cmd = escapeshellarg(PHP_BINARY)
-            . ' ' . escapeshellarg($worker)
-            . ' --host ' . escapeshellarg($this->mysqlHost)
-            . ' --port ' . $this->mysqlPort
-            . ' --user ' . escapeshellarg($this->mysqlUser)
-            . ' --file ' . escapeshellarg($fileName)
-            . ' --pos ' . $filePos;
-        if ($startTs > 0) {
-            $cmd .= ' --start-ts ' . $startTs;
-        }
-        if ($endTs > 0) {
-            $cmd .= ' --end-ts ' . $endTs;
-        }
-
-        $proc = proc_open(
-            $cmd,
-            [
-                1 => ['pipe', 'w'],
-                2 => ['pipe', 'w'],
-            ],
-            $pipes,
-            __DIR__ . '/..',
-            $env,
-            ['bypass_shell' => true]
+        // 启动 C++ 后台线程 dump（COM_BINLOG_DUMP + 行事件完整类型还原）
+        $handle = @mysqlbox_dump_start(
+            $this->mysqlHost,
+            $this->mysqlPort,
+            $this->mysqlUser,
+            $this->mysqlPassword,
+            $fileName,
+            $filePos,
+            $this->serverId
         );
-        if (!is_resource($proc)) {
-            $this->sse($id, 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => '无法启动 krowinski 解析进程']);
+        if ($handle === false || $handle === null) {
+            $this->sse($id, 'error', [
+                'code' => AgentConstants::INTERNAL_ERROR,
+                'message' => 'binlog dump 启动失败：mysqlbox_dump_start 返回空（请检查 MySQL 复制权限与 binlog 位点）',
+            ]);
             return;
         }
-        // 非阻塞管道：由 Server 事件循环 select 读取，不阻塞主循环
-        stream_set_blocking($pipes[1], false);
-        stream_set_blocking($pipes[2], false);
-
-        $this->dumpProc = $proc;
-        $this->dumpPipe = $pipes[1];
-        $this->dumpErrPipe = $pipes[2];
-        $this->dumpBuffer = '';
+        $this->dumpHandle = $handle;
         $this->dumping = true;
-
-        // 通知 Server 把管道加入事件循环 select
-        if ($this->pipeRegister !== null) {
-            ($this->pipeRegister)($this->dumpPipe);
-        }
-
-        $this->sse('', 'dump-started', ['binlogFile' => $fileName, 'binlogPos' => $filePos]);
+        $this->sse($id, 'dump-started', [
+            'binlogFile' => $fileName,
+            'binlogPos' => $filePos,
+            'serverId' => $this->serverId,
+        ]);
+        return;
     }
 
     /**
-     * 由 Server 事件循环在 dump 子进程 stdout 可读时调用，解析 JSON 行并转 binlog-change 帧。
-     * 返回 'running' | 'ended' | 'error'。
+     * 由 Server 事件循环按 tick 调用，从 C++ 线程安全队列拉取已解析的行变更并推 SSE。
+     * 返回 true 表示 dump 已结束（出错或正常结束），调用方应关闭 SSE 连接。
      */
-    public function onDumpReadable(): string
+    public function pollDump(): bool
     {
-        if ($this->dumpPipe === null) {
-            return 'ended';
+        if ($this->dumpHandle === null) {
+            return true;
         }
-        $chunk = @fread($this->dumpPipe, 65536);
-        if ($chunk === '' || $chunk === false) {
-            // 管道 EOF 或暂无可读：检查进程是否仍存活
-            if ($this->dumpProc !== null) {
-                $st = proc_get_status($this->dumpProc);
-                if (!$st['running']) {
-                    $this->finishDump((int) $st['exitcode']);
-                    return 'ended';
-                }
-            }
-            return 'running';
+        $res = @mysqlbox_dump_poll($this->dumpHandle);
+        if (!is_array($res)) {
+            return true;
         }
-        $this->dumpBuffer .= $chunk;
-        while (($nl = strpos($this->dumpBuffer, "\n")) !== false) {
-            $line = trim(substr($this->dumpBuffer, 0, $nl));
-            $this->dumpBuffer = substr($this->dumpBuffer, $nl + 1);
-            if ($line === '') {
-                continue;
-            }
-            $obj = json_decode($line, true);
-            if (!is_array($obj) || ($obj['type'] ?? '') !== 'change') {
-                // heartbeat 等类型忽略（前端不消费）
-                continue;
-            }
+        $events = $res['events'] ?? [];
+        foreach ($events as $ev) {
             $this->sse('', 'binlog-change', [
-                'kind' => (string) ($obj['kind'] ?? ''),
-                'schema' => (string) ($obj['schema'] ?? ''),
-                'table' => (string) ($obj['table'] ?? ''),
-                'columns' => (array) ($obj['columns'] ?? []),
-                'primaryKeys' => (array) ($obj['primaryKeys'] ?? []),
-                'before' => $obj['before'] ?? null,
-                'after' => $obj['after'] ?? null,
-                'xid' => (int) ($obj['xid'] ?? 0),
-                'timestamp' => (int) ($obj['timestamp'] ?? 0),
-                'binlogFile' => (string) ($obj['binlogFile'] ?? ''),
-                'binlogPos' => (int) ($obj['binlogPos'] ?? 0),
+                'schema' => (string) ($ev['schema'] ?? ''),
+                'table' => (string) ($ev['table'] ?? ''),
+                'op' => (string) ($ev['op'] ?? ''),
+                'columns' => (array) ($ev['columns'] ?? []),
+                'before' => (array) ($ev['before'] ?? []),
+                'after' => (array) ($ev['after'] ?? []),
+                'binlogPos' => (int) ($ev['logPos'] ?? 0),
             ]);
         }
-        // 再次确认进程是否已退出（子进程可能已写完并退出）
-        if ($this->dumpProc !== null) {
-            $st = proc_get_status($this->dumpProc);
-            if (!$st['running']) {
-                $this->finishDump((int) $st['exitcode']);
-                return 'ended';
-            }
+        $err = $res['error'] ?? null;
+        $finished = ($res['finished'] ?? false) === true;
+        if ($err !== null && $err !== '') {
+            $this->sse('', 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => 'binlog dump 异常: ' . $err]);
+            $this->teardownDump();
+            return true;
         }
-        return 'running';
-    }
-
-    private function finishDump(int $exitCode): void
-    {
-        if ($exitCode === 0) {
+        if ($finished) {
             $this->sse('', 'binlog-end', ['exitCode' => 0]);
-        } else {
-            $err = '';
-            if ($this->dumpErrPipe !== null && is_resource($this->dumpErrPipe)) {
-                $err = trim((string) @stream_get_contents($this->dumpErrPipe));
-                $err = substr($err, -300);
-            }
-            $this->sse('', 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => 'binlog 解析进程异常退出 code=' . $exitCode . ($err !== '' ? ': ' . $err : '')]);
+            $this->teardownDump();
+            return true;
         }
-        $this->teardownDump();
+        return false;
     }
 
     /** 心跳（仅 SSE 期间由 Server 定时器推送） */
@@ -320,16 +251,6 @@ final class AgentHandler
             return;
         }
         $this->sse('', 'heartbeat', ['ts' => Frame::now(), 'binlogPos' => null]);
-    }
-
-    public function dumpPipe()
-    {
-        return $this->dumpPipe;
-    }
-
-    public function dumpErrPipe()
-    {
-        return $this->dumpErrPipe;
     }
 
     public function isDumping(): bool
@@ -357,21 +278,9 @@ final class AgentHandler
 
     private function teardownDump(): void
     {
-        if ($this->dumpProc !== null) {
-            $st = proc_get_status($this->dumpProc);
-            if ($st['running']) {
-                proc_terminate($this->dumpProc);
-            }
-            proc_close($this->dumpProc);
-            $this->dumpProc = null;
-        }
-        if ($this->dumpPipe !== null && is_resource($this->dumpPipe)) {
-            fclose($this->dumpPipe);
-            $this->dumpPipe = null;
-        }
-        if ($this->dumpErrPipe !== null && is_resource($this->dumpErrPipe)) {
-            fclose($this->dumpErrPipe);
-            $this->dumpErrPipe = null;
+        if ($this->dumpHandle !== null) {
+            @mysqlbox_dump_stop($this->dumpHandle);
+            $this->dumpHandle = null;
         }
         $this->dumpBuffer = '';
         $this->dumping = false;
@@ -396,7 +305,7 @@ final class AgentHandler
         if ($this->sseWriter === null) {
             return;
         }
-        ($this->sseWriter)(Frame::sse($id, $type, $payload));
+        $this->sseWriter->write(Frame::sse($id, $type, $payload));
     }
 
     private function respond(string $id, string $type, array $payload): void
@@ -409,6 +318,6 @@ final class AgentHandler
         if ($this->responder === null) {
             return;
         }
-        ($this->responder)($json);
+        $this->responder->respondJson($json);
     }
 }

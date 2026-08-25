@@ -9,9 +9,10 @@ namespace DmsAgent;
  *
  * 实现：
  *   - stream_socket_server 监听 TCP
- *   - stream_select 事件循环，并发处理多连接 + dump 子进程 stdout 管道
- *   - 支持 SSE 长流（dump）：HTTP 头 text/event-stream 后保持连接，子进程
- *     可读时逐行转发 binlog-change 帧；心跳由 select 超时驱动
+ *   - stream_select 事件循环，并发处理多连接
+ *   - 支持 SSE 长流（dump）：HTTP 头 text/event-stream 后保持连接；dump 由 C++ 后台
+ *     线程抓取并解析（mysqlbox_dump_*），Server 在事件循环 tick 中按节奏调用
+ *     handler->pollDump() 拉取已解析行变更并转发 binlog-change 帧；心跳由 select 超时驱动
  *
  * 跨平台：Windows 下 php -S 有 bug 卡死，但原生 socket + stream_select 无此问题。
  */
@@ -20,14 +21,8 @@ final class Server
     private $server;
     /** @var array<int, ClientConn> */
     private array $clients = [];
-    /** @var array<int, AgentHandler> dump 子进程 stdout 管道 -> handler 映射 */
-    private array $dumpPipes = [];
-    /** @var array<int, resource> fd -> 管道资源（select 用） */
-    private array $pipeFds = [];
-    /** @var array<int, resource> fd -> stderr 管道资源（select + 错误日志用） */
-    private array $errFds = [];
-    /** @var array<int, int> stdout fdKey -> 对应 stderr fdKey（dump 结束时一并清理） */
-    private array $errKeys = [];
+    /** @var array<int, AgentHandler> dumping handler 映射（owner handler -> client id 同键） */
+    private array $dumpHandlers = [];
     private int $heartbeatSec = 15;
     private float $lastHeartbeat = 0;
 
@@ -70,15 +65,15 @@ final class Server
                 $read[] = $c->stream();
             }
         }
-        foreach ($this->pipeFds as $fd) {
-            $read[] = $fd;
-        }
-        foreach ($this->errFds as $fd) {
-            $read[] = $fd;
-        }
         // 仅保留合法流资源：若某个 fd（如已退出的 dump 子进程管道）残留为失效资源，
         // 过滤掉，避免 stream_select 对失效资源抛错使整个服务崩溃。
-        $read = array_values(array_filter($read, static fn($r) => is_resource($r)));
+        $filtered = [];
+        foreach ($read as $r) {
+            if (is_resource($r)) {
+                $filtered[] = $r;
+            }
+        }
+        $read = $filtered;
 
         $write = [];
         $except = [];
@@ -122,36 +117,19 @@ final class Server
             }
         }
 
-        // 3a) dump 子进程 stderr 可读（错误诊断）
-        foreach ($this->errFds as $efd => $epipe) {
-            if (in_array($epipe, $read, true)) {
-                $chunk = @fread($epipe, 8192);
-                if ($chunk !== '' && $chunk !== false) {
-                    error_log('agent[dump-err]: ' . trim($chunk));
-                }
+        // 3) dump：遍历正在 dump 的 handler，从 C++ 队列拉取已解析事件并转发 SSE
+        foreach ($this->dumpHandlers as $hid => $handler) {
+            if (!$handler instanceof AgentHandler) {
+                continue;
             }
-        }
-
-        // 3b) dump 子进程 stdout 可读
-        foreach ($this->pipeFds as $fdKey => $pipe) {
-            if (in_array($pipe, $read, true)) {
-                $handler = $this->dumpPipes[$fdKey] ?? null;
-                if ($handler instanceof AgentHandler) {
-                    $status = $handler->onDumpReadable();
-                    if ($status === 'ended') {
-                        // dump 结束：关闭对应 SSE 客户端连接
-                        unset($this->dumpPipes[$fdKey], $this->pipeFds[$fdKey]);
-                        // 同时清理 stderr 管道（finishDump 已 fclose，否则会残留在 errFds 中导致 stream_select 崩溃）
-                        $errKey = $this->errKeys[$fdKey] ?? null;
-                        if ($errKey !== null) {
-                            unset($this->errFds[$errKey], $this->errKeys[$fdKey]);
-                        }
-                        foreach ($this->clients as $cid => $cc) {
-                            if ($cc->owner === $handler && $cc->keepAlive()) {
-                                $cc->close();
-                                unset($this->clients[$cid]);
-                            }
-                        }
+            $ended = $handler->pollDump();
+            if ($ended) {
+                // dump 结束（正常完成或出错）：关闭对应 SSE 客户端连接
+                unset($this->dumpHandlers[$hid]);
+                foreach ($this->clients as $cid => $cc) {
+                    if ($cc->owner === $handler && $cc->keepAlive()) {
+                        $cc->close();
+                        unset($this->clients[$cid]);
                     }
                 }
             }
@@ -161,7 +139,7 @@ final class Server
         $now = microtime(true);
         if ($now - $this->lastHeartbeat >= $this->heartbeatSec) {
             $this->lastHeartbeat = $now;
-            foreach ($this->dumpPipes as $handler) {
+            foreach ($this->dumpHandlers as $handler) {
                 if ($handler instanceof AgentHandler) {
                     $handler->sendHeartbeat();
                 }
@@ -173,29 +151,53 @@ final class Server
     {
         $req = $c->request();
         $router = new Router();
-        $router->handle($req, function (string $body, array $headers, int $code = 200) use ($c) {
-            $c->respond($body, $headers, $code);
-        }, function (AgentHandler $handler) use ($c) {
-            // dump SSE 设置：进入 SSE 模式 + 注入写出回调 + 注册子进程管道到事件循环
-            $c->beginSse();
-            $handler->setSseWriter(function (string $sseLine) use ($c) {
-                $c->writeSse($sseLine);
-            });
-            $c->owner = $handler;
-            $handler->setPipeRegister(function ($pipe) use ($handler) {
-                if (!is_resource($pipe)) {
-                    return;
-                }
-                $fdKey = (int) $pipe;
-                $this->pipeFds[$fdKey] = $pipe;
-                $this->dumpPipes[$fdKey] = $handler;
-                $err = $handler->dumpErrPipe();
-                if (is_resource($err)) {
-                    $errKey = (int) $err;
-                    $this->errFds[$errKey] = $err;
-                    $this->errKeys[$fdKey] = $errKey;
-                }
-            });
-        });
+        $router->handle($req, new ConnResponder($c), new ConnSseSetup($c, $this));
+    }
+
+    public function registerDumpHandler(AgentHandler $handler): void
+    {
+        $this->dumpHandlers[spl_object_id($handler)] = $handler;
+    }
+}
+
+final class ConnResponder implements Responder
+{
+    public function __construct(private ClientConn $c)
+    {
+    }
+
+    public function respond(string $body, array $headers, int $code): void
+    {
+        $this->c->respond($body, $headers, $code);
+    }
+}
+
+final class SseLineWriter implements SseWriter
+{
+    public function __construct(private ClientConn $c)
+    {
+    }
+
+    public function write(string $sseLine): void
+    {
+        $this->c->writeSse($sseLine);
+    }
+}
+
+final class ConnSseSetup implements SseSetup
+{
+    public function __construct(
+        private ClientConn $c,
+        private Server $server
+    ) {
+    }
+
+    public function setup(AgentHandler $handler): void
+    {
+        $this->c->beginSse();
+        $handler->setSseWriter(new SseLineWriter($this->c));
+        $this->c->owner = $handler;
+        // SSE 连接专用于 dump：登记到 Server 的 dumpHandlers，由事件循环 tick 调 pollDump 拉取事件
+        $this->server->registerDumpHandler($handler);
     }
 }

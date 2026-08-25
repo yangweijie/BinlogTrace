@@ -1,0 +1,14 @@
+name: binlog-agent
+mode: bin
+build-dir: build
+output: binlog-agent
+sources:
+  - src
+# MySQL C Connector（libmysqlclient）路径：提供 mysql.h / libmysql.lib / libmysql.dll
+# 已下载 MySQL Connector/C 6.1.11 到 vendor-c/mysql-connector-c-6.1.11-winx64/
+include-paths:
+  - vendor-c/mysql-connector-c-6.1.11-winx64/include
+link-paths:
+  - vendor-c/mysql-connector-c-6.1.11-winx64/lib
+link-libs:
+  - libmysql.lib

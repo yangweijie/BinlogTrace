@@ -4,14 +4,16 @@ declare(strict_types=1);
 
 namespace DmsAgent;
 
+use DmsAgent\Mysql\PdoConnection;
+
 /**
- * MetaGatherer — 用纯 PDO 采集 MySQL 元数据（协议 v2「connected」帧所需字段）
- * 对应原 agent-workerman 的 MetaGatherer，但去掉 workerman/krowinski 适配器依赖，改为同步 PDO。
+ * MetaGatherer — 采集 MySQL 元数据（协议 v2「connected」帧所需字段）。
+ * 改用 PdoConnection（C++ 直连）查询，去掉对 PDO 对象与 pdo_mysql 扩展的依赖。
  */
 final class MetaGatherer
 {
     public function __construct(
-        private \PDO $pdo,
+        private PdoConnection $conn,
         private int $serverId
     ) {
     }
@@ -32,7 +34,7 @@ final class MetaGatherer
      */
     public function gather(): array
     {
-        $version = $this->pdo->getAttribute(\PDO::ATTR_SERVER_VERSION) ?: '';
+        $version = $this->conn->serverVersion();
         $hasBinlog = $this->checkBinlogEnabled();
 
         $binlogFormat = $this->var('binlog_format') ?: 'UNKNOWN';
@@ -76,12 +78,7 @@ final class MetaGatherer
     private function queryRow(string $sql): ?array
     {
         try {
-            $stmt = $this->pdo->query($sql);
-            if ($stmt === false) {
-                return null;
-            }
-            $row = $stmt->fetch(\PDO::FETCH_ASSOC);
-            return is_array($row) ? $row : null;
+            return $this->conn->queryRow($sql);
         } catch (\Throwable $e) {
             return null;
         }
@@ -101,17 +98,7 @@ final class MetaGatherer
     private function privileges(): array
     {
         try {
-            $stmt = $this->pdo->query('SHOW GRANTS FOR CURRENT_USER');
-            if ($stmt === false) {
-                return [];
-            }
-            $privs = [];
-            while ($g = $stmt->fetchColumn(0)) {
-                if (is_string($g)) {
-                    $privs[] = $g;
-                }
-            }
-            return $privs;
+            return $this->conn->fetchColumn('SHOW GRANTS FOR CURRENT_USER', 0);
         } catch (\Throwable $e) {
             return [];
         }
