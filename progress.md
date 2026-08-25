@@ -76,3 +76,28 @@
 ### 关键文件改动
 - `agent/src/Router.php`、`agent/src/Server.php`、`agent/src/ClientConn.php`、`agent/bin/mysqlbinlog_dump.php`
 - `frontend/src/hooks/useSchemaMeta.ts`、`frontend/src/types/api.d.ts`、`frontend/src/lib/check-cfg.ts`、`frontend/src/pages/TracePage.tsx`
+
+## Session 2026-08-25（updatedWithin 误杀修复 + vendor-c 清理）
+
+### 已完成
+- [x] **`updatedWithin` 默认强制开启导致「查询范围查不到变更 + 一直心跳不停止」修复**
+  - 根因：`WsHandler.php` 中 `updatedWithin` 默认 86400 且按窗口长度推算，子进程对每行执行 `updated_at` 业务时间过滤，
+    与「按 binlog 事件时间窗口（startMs/endMs）查询」叠加，把 `updated_at` 不在最近 24h 内的行 `continue` 误杀 → 查不到变更。
+  - `agent-workerman/src/WsHandler.php`：去掉默认 86400 与按窗口长度推算，仅当 `payload['updatedWithin']>0` 显式传入才启用（默认 0 = 关闭）。
+  - `agent-workerman/bin/krowinski_dump.php`：`--updated-within` 默认值 `86400` → `0`（与 WsHandler 一致）；`onXID` 内 `if ($st->updatedWithin > 0)` 过滤逻辑不变。
+  - 现在「查询范围」回到纯 binlog 事件时间（startTs/endTs）过滤，与「之前能查到变更」行为一致；越界后 `runWithStopCheck` 自动退出 → `binlog-end` → SSE 关闭。
+  - `updatedWithin` 保留为可选显式开关（前端传 `updatedWithin:86400` 即恢复「只捕获 updated_at 最近24h」语义），与范围查询正交。
+- [x] **`agent/vendor-c` 无用文件清理**
+  - 删除 `mariadb-connector-c-3.1.28-src/`（283 文件，未被 `project.yml` 引用的误下载 MariaDB 源码树）。
+  - 删除顶层冗余副本 `vendor-c/bin/`、`vendor-c/include/`、`vendor-c/lib/`（均为 `mysql-connector-c-6.1.11-winx64/` 的重复，且全仓库 0 脚本引用顶层路径）。
+  - 保留 `mysql-connector-c-6.1.11-winx64/{include,lib,bin,docs}` + `COPYING`/`README`（`project.yml` 实际引用）。
+  - 验证：子目录 `lib/libmysql.dll`(4,879,360) = 原顶层 `bin/libmysql.dll`；运行时 dll 实际在 `agent/libmysql.dll`（已复制到 agent 根，exe 同目录），不依赖 vendor-c 下 dll。
+
+### 关键决策
+- `updatedWithin` 不应默认全局强制开启，必须与「按时间范围查询」解耦，否则叠加误杀变更。
+- `vendor-c` 顶层 `bin/include/lib` 是历史遗留的冗余副本，非构建所需（构建只引用 `mysql-connector-c-6.1.11-winx64/`）。
+
+### 关键文件改动
+- `agent-workerman/src/WsHandler.php`（`handleBinlogDump` 内 updatedWithin 计算）
+- `agent-workerman/bin/krowinski_dump.php`（`--updated-within` 默认值）
+- `agent/vendor-c/`（删除 mariadb 源码树 + 顶层冗余副本）

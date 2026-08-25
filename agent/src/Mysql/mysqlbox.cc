@@ -1,8 +1,11 @@
 // mysqlbox.cc — C++ libmysqlclient 直连层（绕开 PDO，避免 pdo_mysql 扩展依赖）
 // 编译期通过 project.yml 的 include-paths / link-paths / link-libs 链接 MySQL C Connector。
+#define _CRT_SECURE_NO_WARNINGS
+#include <winsock2.h>
 #include "phpx.h"
 #include <mysql.h>
 #include <string>
+#pragma comment(lib, "ws2_32.lib")
 #include <vector>
 #include <deque>
 #include <mutex>
@@ -631,6 +634,74 @@ static void parseRowsEvent(DumpSession *s, const unsigned char *body, size_t bod
     }
 }
 
+// --- 内联实现 net_write_command（Connector/C 未导出该符号，这里用公开的 NET::fd + WinSock send 自包含实现，
+//     仅支持无压缩、无 SSL 的 TCP 场景，本 agent 的连接已禁用 SSL 且不压缩，安全可用） ---
+static int my_net_write_raw(NET *net, const unsigned char *packet, size_t len) {
+    while (len > 0) {
+        int w = send(net->fd, (const char *)packet, (int)len, 0);
+        if (w <= 0) return 1;
+        packet += w;
+        len -= (size_t)w;
+    }
+    return 0;
+}
+
+// 从 socket 读满 n 字节（处理短读）。返回 0 成功，-1 失败/超时。
+static int sock_read_full(my_socket fd, unsigned char *buf, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        int r = recv(fd, (char *)buf + got, (int)(n - got), 0);
+        if (r < 0) {
+            int e = WSAGetLastError();
+            if (e == WSAEWOULDBLOCK || e == WSAETIMEDOUT) return -2; // 超时，无数据
+            return -1;
+        }
+        if (r == 0) return -1; // 对端关闭
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+// 读一个 MySQL 协议包。成功时 *out 指向 payload、*outLen 为 payload 长度（不含 4 字节头）。
+// 返回 0 成功，-2 读超时（无数据），-1 连接断开/错误。
+// 注意：仅用于 binlog dump 流（无压缩、无 SSL），且每次读完整 payload（binlog 事件单包 <= max_packet）。
+static int read_one_packet(NET *net, std::vector<unsigned char> &pkt) {
+    unsigned char hdr[4];
+    int r = sock_read_full(net->fd, hdr, 4);
+    if (r != 0) return r;
+    size_t len = (size_t)hdr[0] | ((size_t)hdr[1] << 8) | ((size_t)hdr[2] << 16);
+    if (len == 0) { pkt.clear(); return 0; }
+    pkt.resize(len);
+    r = sock_read_full(net->fd, pkt.data(), len);
+    if (r != 0) return r;
+    return 0;
+}
+
+static int my_net_flush(NET *net) {
+    size_t len = (size_t)(net->write_pos - net->buff);
+    if (len == 0) return 0;
+    if (my_net_write_raw(net, net->buff, len)) return 1;
+    net->write_pos = net->buff;
+    return 0;
+}
+
+static int my_net_write_command(NET *net, unsigned char cmd,
+                                const unsigned char *header, size_t head_len,
+                                const unsigned char *packet, size_t len) {
+    size_t length = head_len + len + 1;
+    unsigned char *buf = net->buff;
+    if (length > (size_t)(net->buff_end - net->buff)) return 1; // 包过大
+    buf[0] = (unsigned char)(length & 0xff);
+    buf[1] = (unsigned char)((length >> 8) & 0xff);
+    buf[2] = (unsigned char)((length >> 16) & 0xff);
+    buf[3] = (unsigned char)(net->pkt_nr++);
+    buf[4] = cmd;
+    if (head_len) memcpy(buf + 5, header, head_len);
+    if (len) memcpy(buf + 5 + head_len, packet, len);
+    net->write_pos = buf + 5 + head_len + len;
+    return my_net_flush(net);
+}
+
 // --- dump 工作线程主循环 ---
 static void dumpWorker(DumpSession *s) {
     auto logf = [](const char *fmt, ...) {
@@ -661,67 +732,178 @@ static void dumpWorker(DumpSession *s) {
     s->replConn = c;
     logf("[DUMP] connected");
 
-    // 读超时：让 stopFlag 能及时响应（否则 mysql_fetch_row 会阻塞直到 server 推送新事件）
-    unsigned int replReadTimeout = 2;
-    mysql_options(c, MYSQL_OPT_READ_TIMEOUT, &replReadTimeout);
+    // 读超时：让 stopFlag 能及时响应。mysql_options 必须在 connect 前设置才生效，
+    // 这里直接对 socket 设 SO_RCVTIMEO，使底层 recv 在无事件时 2 秒后超时返回。
+    {
+        DWORD tv = 2000;
+        setsockopt(c->net.fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+    }
 
-    // CRC32 校验（MySQL 8 默认）
-    mysql_real_query(c, "SET @master_binlog_checksum='CRC32'", 36);
-    // 关闭补全（server 发多少我们读多少）
-    mysql_real_query(c, "SET @master_heartbeat_period=0", 29);
-    logf("[DUMP] set checksum/heartbeat ok");
+    // SET 语句用 libmysql 高层 API 发送：mysql_real_query 内部会用正确的 pkt_nr 序列
+    // 发包并消费响应，从而让 net->pkt_nr 保持在正确状态，供后续底层 COM_BINLOG_DUMP 续接。
+    // 注意：不调用 mysql_store_result / mysql_read_query_result（SET 无结果集，且 dump 流
+    // 不能走标准 result API），mysql_real_query 成功即表示响应已读完。
+    if (mysql_real_query(c, "SET @master_binlog_checksum='CRC32'", (unsigned long)strlen("SET @master_binlog_checksum='CRC32'")) != 0) {
+        s->errored = true;
+        s->lastError = std::string("SET @master_binlog_checksum failed: ") + mysql_error(c);
+        s->finished = true;
+        logf("[DUMP] SET1 failed: %s", mysql_error(c));
+        return;
+    }
+    if (mysql_real_query(c, "SET @master_heartbeat_period=0", (unsigned long)strlen("SET @master_heartbeat_period=0")) != 0) {
+        s->errored = true;
+        s->lastError = std::string("SET @master_heartbeat_period failed: ") + mysql_error(c);
+        s->finished = true;
+        logf("[DUMP] SET2 failed: %s", mysql_error(c));
+        return;
+    }
+    logf("[DUMP] set checksum/heartbeat ok (pkt_nr=%u)", c->net.pkt_nr);
 
-    // COM_BINLOG_DUMP
+    // COM_BINLOG_DUMP —— 必须用二进制协议命令（net_write_command），不能用 mysql_real_query（那是 COM_QUERY，会被当 SQL 解析）
     std::string file = s->startFile;
     uint32_t pos = (uint32_t)s->startPos;
     uint32_t sid = s->serverId;
-    std::string cmd;
-    cmd.resize(1 + 4 + 2 + 4 + file.size());
-    cmd[0] = 0x12; // COM_BINLOG_DUMP
-    memcpy(&cmd[1], &pos, 4);
+    std::string body;
+    body.resize(4 + 2 + 4 + file.size());
+    memcpy(&body[0], &pos, 4);              // binlog position
     uint16_t flags = 0;
-    memcpy(&cmd[5], &flags, 2);
-    memcpy(&cmd[7], &sid, 4);
-    memcpy(&cmd[11], file.c_str(), file.size());
-    if (mysql_real_query(c, cmd.c_str(), (unsigned long)cmd.size()) != 0) {
+    memcpy(&body[4], &flags, 2);            // flags
+    memcpy(&body[6], &sid, 4);              // server id
+    memcpy(&body[10], file.c_str(), file.size()); // binlog filename
+
+    logf("[DUMP] net.fd=%lld buff=%p buff_end=%p write_pos=%p pkt_nr=%u",
+         (long long)(c->net.fd), (void*)c->net.buff, (void*)c->net.buff_end, (void*)c->net.write_pos, c->net.pkt_nr);
+    // 发送 COM_BINLOG_DUMP（每个命令的包序号必须由 1 开始，否则 server 报 1156 "out of order"）。
+    // libmysql 在前面 SET 查询后把 net->pkt_nr 推到了 2，这里强制归零，使 my_net_write_command
+    // 内部 ++ 后实际发送序号为 1。
+    // 注意：server 在 dump 命令报错后会直接断开连接，不可在同连接上重试，故只发一次、读一次响应。
+    c->net.pkt_nr = 0; // 实际发送序号 = 1
+    // 诊断：打印将发送的包（长度+cmd+body）
+    {
+        std::string hex;
+        char tmp[8];
+        unsigned char pkt[5 + 23];
+        // 重新构造以打印（实际发送序号 = net->pkt_nr 经 ++ 后 = 1）
+        uint32_t L = (uint32_t)(0 + body.size() + 1);
+        pkt[0] = L & 0xff; pkt[1] = (L >> 8) & 0xff; pkt[2] = (L >> 16) & 0xff;
+        pkt[3] = (unsigned char)(c->net.pkt_nr + 1); // 显示真实发送序号
+        pkt[4] = 0x12;
+        memcpy(pkt + 5, body.data(), body.size());
+        for (int i = 0; i < 5 + (int)body.size(); i++) {
+            sprintf(tmp, "%02x ", pkt[i]); hex += tmp;
+        }
+        logf("[DUMP] packet(%d): %s", 5 + (int)body.size(), hex.c_str());
+    }
+
+    std::vector<unsigned char> firstPkt;
+    if (my_net_write_command(&c->net, 0x12 /*COM_BINLOG_DUMP*/, NULL, 0,
+                             (const unsigned char *)body.data(), body.size()) != 0) {
         s->errored = true;
-        s->lastError = std::string("COM_BINLOG_DUMP failed: ") + mysql_error(c);
+        s->lastError = std::string("COM_BINLOG_DUMP send failed: ") + mysql_error(c);
         s->finished = true;
-        logf("[DUMP] COM_BINLOG_DUMP failed: %s", mysql_error(c));
+        logf("[DUMP] COM_BINLOG_DUMP send failed");
         return;
     }
-    logf("[DUMP] COM_BINLOG_DUMP sent, entering read loop");
-
-    MYSQL_RES *res = mysql_use_result(c); // 流式读取
-    if (res == nullptr) {
-        s->errored = true;
-        s->lastError = std::string("mysql_use_result failed: ") + mysql_error(c);
-        s->finished = true;
-        logf("[DUMP] mysql_use_result failed: %s", mysql_error(c));
-        return;
+    // 读首个响应（OK 包或 binlog 事件，或 ERR）
+    int rr = read_one_packet(&c->net, firstPkt);
+    if (rr != 0) {
+        // 读超时或无数据：可能 dump 已建立但暂无事件，视为成功
+        if (rr == -2) {
+            logf("[DUMP] COM_BINLOG_DUMP accepted (no immediate event), entering read loop");
+        } else {
+            s->errored = true;
+            s->lastError = "read first dump response failed";
+            logf("[DUMP] read first dump resp failed rr=%d", rr);
+            return;
+        }
+    } else if (!firstPkt.empty()) {
+        uint8_t flag = firstPkt[0];
+        if (flag == 0xFF) {
+            uint16_t ec = 0;
+            if (firstPkt.size() >= 3) ec = (uint16_t)(firstPkt[1] | (firstPkt[2] << 8));
+            s->errored = true;
+            s->lastError = std::string("COM_BINLOG_DUMP rejected: error ") + std::to_string(ec);
+            s->finished = true;
+            logf("[DUMP] COM_BINLOG_DUMP rejected code=%u", (unsigned)ec);
+            return;
+        }
+        if (flag == 0xFE) {
+            s->finished = true;
+            logf("[DUMP] COM_BINLOG_DUMP got EOF immediately");
+            return;
+        }
+        // 0x00 或其他：当作事件包，进入主循环消费
+        logf("[DUMP] COM_BINLOG_DUMP accepted (first flag=0x%02x), entering read loop", (unsigned)flag);
+    } else {
+        logf("[DUMP] COM_BINLOG_DUMP accepted (empty first pkt), entering read loop");
     }
 
-    MYSQL_ROW row;
+    // 进入主循环前做一次最终判断：前面任意一步已置 errored/finished 则直接结束
+    if (s->errored || s->finished) {
+        logf("[DUMP] COM_BINLOG_DUMP rejected, not entering read loop");
+        return;
+    }
+    logf("[DUMP] COM_BINLOG_DUMP accepted, entering read loop (pkt_nr=%u)", c->net.pkt_nr);
+
     while (!s->stopFlag.load()) {
-        row = mysql_fetch_row(res);
-        if (row == nullptr) {
-            int eno = mysql_errno(c);
-            if (eno != 0 && eno != 2006 && eno != 2013) {
-                // 非超时类错误才视为失败；超时(2006/2013)由 read timeout 触发，属正常轮询，继续
+        // 直接读 binlog 事件流（COM_BINLOG_DUMP 成功后 server 持续推事件包）
+        std::vector<unsigned char> pkt;
+        if (!firstPkt.empty() && firstPkt[0] != 0xFF) {
+            // 首个包（OK 或事件）尚未处理，先消费它
+            pkt = std::move(firstPkt);
+            firstPkt.clear();
+        } else {
+            int rr = read_one_packet(&c->net, pkt);
+            if (rr == -2) {
+                // 读超时（无新事件），短暂让出 CPU 后继续轮询 stopFlag
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+            if (rr != 0) {
                 s->errored = true;
-                s->lastError = std::string("fetch failed: ") + mysql_error(c);
+                s->lastError = std::string("socket read failed during dump");
+                logf("[DUMP] socket read failed (rr=%d)", rr);
                 break;
             }
-            // 超时或暂无数据：让出 CPU，下一轮检查 stopFlag
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        // if/else 仅负责填充 pkt；以下事件解析为公共逻辑（首包与新读取都走这里）
+        if (pkt.empty()) continue; // 空包，忽略
+
+        uint8_t flag = pkt[0];
+        if (flag == 0xFF) {
+            // ERR 包：连接将断。解析错误码与消息便于诊断。
+            // 格式：0xFF + error_code(2,LE) + '#' + sql_state(5) + message
+            uint16_t errCode = 0;
+            std::string errMsg;
+            if (pkt.size() >= 3) {
+                errCode = (uint16_t)(pkt[1] | (pkt[2] << 8));
+            }
+            if (pkt.size() >= 9 && pkt[3] == '#') {
+                errMsg.assign((const char *)pkt.data() + 9, pkt.size() - 9);
+            } else if (pkt.size() >= 3) {
+                errMsg.assign((const char *)pkt.data() + 3, pkt.size() - 3);
+            }
+            s->errored = true;
+            s->lastError = std::string("server sent ERR during dump: ") + std::to_string(errCode) + " " + errMsg;
+            logf("[DUMP] server ERR during dump: code=%u msg=%s", (unsigned)errCode, errMsg.c_str());
+            break;
+        }
+        if (flag == 0xFE) {
+            // EOF：通常 dump 被 server 结束，视为正常结束
+            logf("[DUMP] got EOF, dump ended by server");
+            break;
+        }
+        if (flag != 0x00) {
+            // 未知首字节，记录后跳过
+            logf("[DUMP] unknown packet flag 0x%02x len=%zu", (unsigned)flag, pkt.size());
             continue;
         }
-        unsigned long *lengths = mysql_fetch_lengths(res);
-        if (lengths == nullptr || lengths[0] == 0) continue;
 
-        const unsigned char *ev = (const unsigned char *)row[0];
-        size_t evLen = lengths[0];
-        if (evLen < 19) continue; // 事件头最小长度
+        // 0x00 开头：binlog 事件包，pkt[1..] 为 binlog event 原始字节
+        const unsigned char *ev = pkt.data() + 1;
+        size_t evLen = pkt.size() - 1;
+        if (evLen < 19) continue; // 过短（如纯 OK 确认包）忽略
 
         // 事件头：timestamp(4) + type(1) + server_id(4) + event_len(4) + log_pos(4) + flags(2)
         uint8_t type = ev[4];
@@ -791,7 +973,6 @@ static void dumpWorker(DumpSession *s) {
         }
     }
 
-    mysql_free_result(res);
     s->finished.store(true);
 }
 

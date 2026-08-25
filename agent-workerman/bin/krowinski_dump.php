@@ -36,7 +36,7 @@ declare(strict_types=1);
  */
 
 $opts = getopt('', [
-    'host:', 'port:', 'user:', 'password:', 'file:', 'pos:', 'db:', 'max:', 'start-ts:', 'end-ts:',
+    'host:', 'port:', 'user:', 'password:', 'file:', 'pos:', 'db:', 'max:', 'start-ts:', 'end-ts:', 'updated-within:',
 ]);
 
 $host = (string) ($opts['host'] ?? '127.0.0.1');
@@ -50,6 +50,10 @@ $dbFilter = (string) ($opts['db'] ?? '');   // 仅输出该库的事件（空 = 
 $max = (int) ($opts['max'] ?? 0);           // 最多输出 N 行 change（0 = 不限，用于测试）
 $startTs = (int) ($opts['start-ts'] ?? 0);  // 早于该时刻（epoch 秒）的行事件跳过；>0 时自动定位起点文件
 $endTs = (int) ($opts['end-ts'] ?? 0);      // 越过该时刻（epoch 秒）后退出
+// 业务级时间筛选：只输出 updated_at 落在「当前时刻 - N 秒」之内的行变更。
+// 默认 0（关闭，仅使用 binlog 事件时间窗口 startTs/endTs 过滤）；
+// 需显式传入 --updated-within > 0（如 86400）才启用，避免与「按时间范围查询」叠加误杀变更。
+$updatedWithin = (int) ($opts['updated-within'] ?? 0);
 
 if ($file === '') {
     fwrite(STDERR, "krowinski_dump: --file 必填（或由 --start-ts 自动定位）\n");
@@ -221,7 +225,7 @@ $binLogStream = new MySQLReplicationFactory(
         ->build()
 );
 
-$state = new class($dbFilter, $max, $startTs, $endTs) {
+$state = new class($dbFilter, $max, $startTs, $endTs, $updatedWithin) {
     /** 待输出行（当前事务缓冲：XID 事件在行之后，需等 XID 赋号） */
     public array $pending = [];
     public string $binlogFile;
@@ -231,11 +235,60 @@ $state = new class($dbFilter, $max, $startTs, $endTs) {
         public int $max,
         public int $startTs,
         public int $endTs,
+        public int $updatedWithin,
         public int $emitted = 0,
     ) {
         $this->binlogFile = $GLOBALS['file'];
     }
 };
+$GLOBALS['state'] = $state; // 供 runWithStopCheck 的闭包访问
+
+/**
+ * 解析行数据里的 updated_at 为 epoch 秒；无法解析返回 null（调用方视情况放行）。
+ * 支持：MySQL DATETIME/TIMESTAMP（Y-m-d H:i:s / Y-m-d\TH:i:s / Y-m-d）、Unix 秒、Unix 毫秒。
+ */
+function parseUpdatedAt(array $row): ?int
+{
+    $candidates = [];
+    if (isset($row['after']) && is_array($row['after']) && isset($row['after']['updated_at'])) {
+        $candidates[] = $row['after']['updated_at'];
+    }
+    if (isset($row['before']) && is_array($row['before']) && isset($row['before']['updated_at'])) {
+        $candidates[] = $row['before']['updated_at'];
+    }
+    // 兼容 after/before 为索引数组（按 columns 顺序）的情况
+    if (empty($candidates) && isset($row['columns']) && is_array($row['columns'])) {
+        $idx = array_search('updated_at', $row['columns'], true);
+        if ($idx !== false) {
+            if (isset($row['after']) && is_array($row['after']) && isset($row['after'][$idx])) {
+                $candidates[] = $row['after'][$idx];
+            } elseif (isset($row['before']) && is_array($row['before']) && isset($row['before'][$idx])) {
+                $candidates[] = $row['before'][$idx];
+            }
+        }
+    }
+    foreach ($candidates as $v) {
+        if ($v === null || $v === '') {
+            continue;
+        }
+        if (is_numeric($v)) {
+            $n = (int) $v;
+            // 毫秒（13 位）转秒
+            if ($n > 1e12) {
+                $n = intdiv($n, 1000);
+            }
+            if ($n > 0) {
+                return $n;
+            }
+            continue;
+        }
+        $t = strtotime((string) $v);
+        if ($t !== false && $t > 0) {
+            return $t;
+        }
+    }
+    return null;
+}
 
 $binLogStream->registerSubscriber(
     new class($state) extends EventSubscribers {
@@ -256,6 +309,14 @@ $binLogStream->registerSubscriber(
                 // 越过窗口终点：历史窗口不会再有新事件，正常退出
                 if ($st->endTs > 0 && $row['timestamp'] > $st->endTs) {
                     exit(0);
+                }
+                // 业务级时间筛选：只保留 updated_at 在「当前时刻 - updatedWithin 秒」之内的行变更。
+                // updated_at 缺失/为空/无法解析时放行（避免误杀无该列的表或 NULL 值）。
+                if ($st->updatedWithin > 0) {
+                    $uaTs = parseUpdatedAt($row);
+                    if ($uaTs !== null && $uaTs < (time() - $st->updatedWithin)) {
+                        continue;
+                    }
                 }
                 $row['xid'] = $xid;
                 emit($row);
@@ -357,10 +418,19 @@ $binLogStream->registerSubscriber(
     }
 );
 
-// 同步阻塞循环：父进程负责 kill（proc_terminate / taskkill），stdout 关闭/断连时由 agent 侧
-// teardownDumpWorker 终止本进程，不在此另设看门狗
+// 同步循环：用 runWithStopCheck 在本地时间越界时主动停止，不依赖 server 心跳事件
+// （server 在追平文件尾、窗口已过期且无新事件时可能不发 HEARTBEAT，导致 onHeartbeat 兜底不触发）。
+// 父进程仍可在需要时 kill 本进程（stdout 关闭/断连由 agent 侧 teardownDumpWorker 处理）。
+$stopCheck = function (): bool {
+    $st = $GLOBALS['state'];
+    // endTs 已过去超过 5s → 窗口内不会再有新事件，正常退出
+    if ($st->endTs > 0 && time() > $st->endTs + 5) {
+        return false;
+    }
+    return true;
+};
 try {
-    $binLogStream->run();
+    $binLogStream->runWithStopCheck($stopCheck);
 } catch (\Throwable $e) {
     fwrite(STDERR, 'krowinski_dump: ' . $e->getMessage() . "\n");
     exit(1);

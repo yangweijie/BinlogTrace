@@ -276,6 +276,10 @@ final class WsHandler
         if ($endTs > 0) {
             $cmd .= ' --end-ts ' . $endTs;
         }
+        // 业务级时间筛选（秒，按 updated_at 列过滤；0 = 关闭，仅使用 binlog 事件时间窗口 startTs/endTs 过滤）。
+        // 必须由前端显式传入 updatedWithin > 0 才启用，不默认开启——否则会与「按时间范围查询」叠加误杀变更。
+        $updatedWithin = (int) ($payload['updatedWithin'] ?? 0);
+        $cmd .= ' --updated-within ' . $updatedWithin;
         // stdout/stderr 重定向到文件而非管道：Windows 上 proc_open 管道的
         // stream_set_blocking(false) 无效，fread 会阻塞直到子进程输出，
         // 长驻 dump（追平文件尾后无输出）会把 Workerman 事件循环卡死，

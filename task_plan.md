@@ -72,6 +72,11 @@
   - [x] 心跳退出加 `$gotData` 闸门（mysqlbinlog 连接间隙 >1s 无数据不按墙钟自杀）
   - [x] **binlog 解析整体改为纯 PHP krowinski/php-mysql-replication**（替代本地 mysqlbinlog CLI；消除 9.4 缺 mysql_native_password 插件导致的 code=1/1099），与 `AgentHandler::handleDump` 契约一致
 
+- [x] **Phase G — updatedWithin 误杀修复 + vendor-c 清理**（本轮，已完成）
+  - [x] `WsHandler::handleBinlogDump`：`updatedWithin` 去掉默认 86400 与窗口长度推算，仅当 `payload['updatedWithin']>0` 显式传入才启用（默认 0 = 关闭）—— 修复「查询范围查不到变更 + 一直心跳」（`updatedWithin` 与「按 binlog 事件时间窗口查询」叠加误杀行）
+  - [x] `krowinski_dump.php`：`--updated-within` 默认值 `86400` → `0`（与 WsHandler 一致）；`updatedWithin` 保留为可选显式开关（前端传 86400 即恢复「只捕获 updated_at 最近24h」）
+  - [x] `agent/vendor-c` 清理：删 `mariadb-connector-c-3.1.28-src/`（283 文件误下载源码树）+ 顶层冗余副本 `bin/`、`include/`、`lib/`（均为 `mysql-connector-c-6.1.11-winx64/` 重复且 0 引用）；保留 `project.yml` 实际引用的 `mysql-connector-c-6.1.11-winx64/{include,lib,bin,docs}`
+
 ## Decisions
 | # | Decision | Rationale |
 |---|----------|-----------|
@@ -109,3 +114,6 @@
 - [ ] 清理临时探针：`tests/_probe_dump_frames.php`、`tests/_probe_parser.php`、`tests/_probe_krowinski.php`、
       `tests/_probe_dump_flags.php`、`runtime/_e2e_*.php`、`runtime/_repro_f.php`、`runtime/kw_*.log`、`runtime/krowinski.pid`
 - [ ] （可选）probeOne 内加文件内二分，精确到文件内位置（历史很旧时提速）
+- [ ] **本轮(2026-08-25)验证项**：重启 agent-workerman 后跑「查询范围(近24h)」—— 应查到变更且窗口结束收到 binlog-end 自动停止（updatedWithin 默认关闭已修复误杀）
+- [ ] **本轮清理验证**：`agent/vendor-c` 仅留 `mysql-connector-c-6.1.11-winx64/`，重新编译 mysqlbox.cc 确认 dev/build 脚本路径未失效
+- [ ] （可选）前端加「按 updated_at 过滤」独立勾选框；勾选时 run 显式传 `updatedWithin:86400`，否则默认不传

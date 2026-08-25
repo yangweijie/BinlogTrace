@@ -29,6 +29,19 @@ PDO SHOW BINARY LOGS（按名升序 binlog.000040 < ... < 000042，末个=当前
 - 不做文件内二分：多读的部分被 `--start-ts` 过滤，无正确性影响，仅历史很旧时探测稍慢。
 - 心跳周期降到 5s（历史窗口越过 endTs 后无新行事件时靠心跳 `time() > endTs+5` 快速退出）。
 
+## updatedWithin 与「按时间范围查询」不能叠加（2026-08-25 发现）
+- `updatedWithin`（按 `updated_at` 业务列过滤 `uaTs < now - N`）**不能默认开启**，否则与「按 binlog 事件时间窗口 startMs/endMs 查询」叠加，
+  把 `updated_at` 列值不在最近 N 秒内的真实变更 `continue` 误杀 → 表现「查询范围查不到变更 + SSE 一直心跳不停止」。
+- 修复：`WsHandler` + `krowinski_dump.php` 都将 `updatedWithin` 默认改为 0（关闭）；仅前端显式传 `payload['updatedWithin']>0` 才启用。
+  `updatedWithin` 作为与范围查询正交的可选显式开关（前端传 86400 即恢复「只捕获 updated_at 最近24h」语义）。
+
+## agent/vendor-c 目录真相（2026-08-25 清理）
+- `project.yml` 只引用 `mysql-connector-c-6.1.11-winx64/{include,lib}`（编译期头文件 + libmysql.lib/libmysql.dll）。
+- `vendor-c/mariadb-connector-c-3.1.28-src/` 是**未被引用的误下载 MariaDB 源码树**（283 文件），已删。
+- `vendor-c/` 顶层 `bin/`、`include/`、`lib/` 是 `mysql-connector-c-6.1.11-winx64/` 的**冗余副本**
+  （`bin/libmysql.dll`=子目录`lib/libmysql.dll`=4,879,360 字节；`include/` 65 文件与子目录一致），全仓库 0 脚本引用顶层路径，已删。
+- 运行时 `libmysql.dll` 实际在 `agent/libmysql.dll`（已复制到 agent 根，exe 同目录加载），不依赖 `vendor-c` 下 dll。
+
 ## Windows 坑（agent-workerman，proc_open 子进程）
 1. **env 必须 `array_merge(getenv(), [...])`**：只传 `$_ENV`（CLI 下常为空）会整体替换子进程
    环境、丢 PATH/SYSTEMROOT → `socket_create` 10106（Winsock 未初始化），krowinski 无法建连。
