@@ -9,6 +9,7 @@ namespace DmsAgent;
  */
 final class AgentConstants
 {
+    public const VERSION = '1.0.0';
     public const PROTOCOL_VERSION = 2;
     public const HEARTBEAT_INTERVAL_MS = 15000;
     public const CONNECT_TIMEOUT_MS = 10000;

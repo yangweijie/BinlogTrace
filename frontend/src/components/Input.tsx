@@ -5,10 +5,11 @@ interface Props extends InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   error?: string;
   invalid?: boolean;
+  hint?: string;
   rightSlot?: ReactNode;
 }
 
-export default function Input({ label, error, invalid = false, rightSlot, className = '', id, ...rest }: Props) {
+export default function Input({ label, error, invalid = false, hint, rightSlot, className = '', id, ...rest }: Props) {
   const inputId = id ?? (label ? `in-${label}` : undefined);
   return (
     <div className="field">
@@ -26,6 +27,7 @@ export default function Input({ label, error, invalid = false, rightSlot, classN
         />
         {rightSlot}
       </div>
+      {hint ? <div className="field-hint">{hint}</div> : null}
       <div className="field-error" role="alert">
         {error ?? ''}
       </div>

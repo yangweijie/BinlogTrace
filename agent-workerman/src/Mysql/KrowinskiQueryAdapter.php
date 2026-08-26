@@ -82,7 +82,7 @@ final class KrowinskiQueryAdapter
             $nativePdo = $this->pdo->getNativeConnection();
             $stmt = $nativePdo->prepare($sql);
             $stmt->execute();
-            $rows = $stmt->fetchAll(\PDO::FETCH_NUM);
+            $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
             $columns = [];
             $colCount = $stmt->columnCount();
             for ($i = 0; $i < $colCount; $i++) {

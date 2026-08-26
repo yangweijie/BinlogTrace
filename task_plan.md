@@ -72,6 +72,14 @@
   - [x] 心跳退出加 `$gotData` 闸门（mysqlbinlog 连接间隙 >1s 无数据不按墙钟自杀）
   - [x] **binlog 解析整体改为纯 PHP krowinski/php-mysql-replication**（替代本地 mysqlbinlog CLI；消除 9.4 缺 mysql_native_password 插件导致的 code=1/1099），与 `AgentHandler::handleDump` 契约一致
 
+- [x] **Phase G — 代理可达性状态派生 + 数据表多选 + 回滚事务开关**（2026-08-26 下午场）
+  - [x] `AppState.agentReachable` + `deriveTopStatus(state)`（demo > WS connected/wsMeta > agentReachable=true > false > WS error > idle）→ 四页面 TopBar 一致
+  - [x] `TraceConfig.table: string` → `string[]`；数据表 / 结果页表筛选均改 MultiSelect，互斥「全部」与具体表（互斥逻辑内聚到 `MultiSelect.exclusiveOption`）
+  - [x] `MultiSelect` 支持 `string | {value,label}` options、`label`、`id`、`exclusiveOption` props；trigger 高度 36px 与 Select 对齐
+  - [x] `krowinski_dump.php` 心跳 `withHeartbeatPeriod(5)`→`2`、兜底退出 `endTs+5`→`endTs+2`（去除 dump 至少卡 5 秒）
+  - [x] TracePage 去除 48h 时间限制；快捷按钮加「近48小时」「近一周」
+  - [x] `rollback-gen.generateRollback(changes, independentTx=false)`：共享事务（首尾各一次）默认 / 独立事务（每 xid 组包裹），RollbackPage 加 checkbox 切换
+
 ## Decisions
 | # | Decision | Rationale |
 |---|----------|-----------|

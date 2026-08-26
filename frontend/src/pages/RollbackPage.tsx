@@ -5,7 +5,8 @@ import TopBar from '../components/TopBar';
 import Button from '../components/Button';
 import EmptyState from '../components/EmptyState';
 import SqlViewer from '../components/SqlViewer';
-import { useAppState } from '../context/AppContext';
+import { useAppDispatch, useAppState, deriveTopStatus } from '../context/AppContext';
+import { useAgentPing } from '../hooks/useAgentPing';
 import { loadChanges } from '../lib/change-cache';
 import { generateRollbackScript } from '../lib/parser-client';
 import { useRoute, navigate } from '../lib/route';
@@ -69,12 +70,16 @@ async function copySql(sql: string): Promise<void> {
 }
 
 export default function RollbackPage() {
-  const { changes: ctxChanges, wsMeta, demoMode } = useAppState();
+  const state = useAppState();
+  const { changes: ctxChanges, wsMeta, demoMode, agentUrl } = state;
+  const dispatch = useAppDispatch();
+  useAgentPing();
   const route = useRoute();
   const [cached] = useState(() => loadChanges());
   const [rollback, setRollback] = useState<RollbackResult | null>(null);
   const [status, setStatus] = useState<'loading' | 'done' | 'error'>('loading');
   const [error, setError] = useState('');
+  const [independentTx, setIndependentTx] = useState(false);
   const changeId = route.params.get('changeId') ?? '';
   const idsParam = route.params.get('ids') ?? '';
 
@@ -109,7 +114,7 @@ export default function RollbackPage() {
       return;
     }
     setStatus('loading');
-    generateRollbackScript(JSON.stringify(selected))
+    generateRollbackScript(JSON.stringify(selected), independentTx)
       .then((res) => {
         if (cancelled) return;
         if (res.ok) {
@@ -129,7 +134,7 @@ export default function RollbackPage() {
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [selected, independentTx]);
 
   const lineCount = rollback ? splitSqlLines(rollback.sql).length : 0;
   const db = route.params.get('db') ?? selected[0]?.schema ?? '';
@@ -165,7 +170,12 @@ export default function RollbackPage() {
   return (
     <div>
       <TopBar
-        status={demoMode ? 'demo' : wsMeta ? 'connected' : 'idle'}
+        status={deriveTopStatus(state)}
+        agentUrl={agentUrl}
+        onAgentUrlChange={(url, reachable) => {
+          dispatch({ type: 'setAgentUrl', url });
+          if (reachable === false) dispatch({ type: 'setStatus', status: 'error' });
+        }}
         left={
           <button type="button" className="btn btn-ghost" style={{ padding: 'var(--spacing-xs)' }} onClick={() => navigate('/trace/result')} aria-label="返回变更列表">
             <ArrowLeft size={16} aria-hidden="true" />
@@ -188,10 +198,16 @@ export default function RollbackPage() {
           ) : rollback ? (
             <>
               <div className="rollback-toolbar">
-                <span className="text-secondary">
-                  {rollback.stats.transactions} 个事务 · {formatCount(rollback.stats.statements)} 条语句 ·{' '}
-                  <span className="num">{formatCount(lineCount)}</span> 行
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-sm)' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13, userSelect: 'none' }}>
+                    <input type="checkbox" checked={independentTx} onChange={(e) => setIndependentTx(e.target.checked)} />
+                    独立回滚（每条变更单独事务）
+                  </label>
+                  <span className="text-secondary">
+                    {rollback.stats.transactions} 个事务 · {formatCount(rollback.stats.statements)} 条语句 ·{' '}
+                    <span className="num">{formatCount(lineCount)}</span> 行
+                  </span>
+                </div>
                 <div className="rollback-toolbar-actions">
                   <Button onClick={() => void onCopy()}>
                     <Copy size={20} aria-hidden="true" />

@@ -8,6 +8,7 @@ namespace DmsAgent;
  * Router — 把 HTTP 请求路由到 AgentHandler
  *
  * 路由：
+ *   GET  /ping     健康检查：返回服务状态（无需认证）
  *   POST /connect  新会话：测试连接 + 采集元数据，回 connected 帧
  *   POST /query    session 复用：只读查询，回 query-result 帧
  *   POST /dump     session 复用：启动 binlog 解析（SSE 长流）
@@ -37,6 +38,19 @@ final class Router
 
         if ($method === 'OPTIONS') {
             $c->respond('', $cors, 204);
+            return;
+        }
+        if ($method === 'GET' && $path === '/ping') {
+            $c->respond(json_encode([
+                'ok' => true,
+                'service' => 'binlog-agent',
+                'version' => AgentConstants::VERSION,
+                'ts' => time(),
+                'uptime' => (int) (microtime(true) - $_SERVER['REQUEST_TIME_FLOAT'] ?? time()),
+                'php' => PHP_VERSION,
+                'sapi' => PHP_SAPI,
+                'sessions' => SessionManager::count(),
+            ], JSON_UNESCAPED_UNICODE), $cors, 200, 'application/json');
             return;
         }
         if ($method !== 'POST') {

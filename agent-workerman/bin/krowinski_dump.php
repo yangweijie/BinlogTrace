@@ -208,8 +208,9 @@ $binLogStream = new MySQLReplicationFactory(
         ->withPort($port)
         ->withBinLogFileName($file)
         ->withBinLogPosition((string) $pos)
-        // 心跳 5s：历史窗口越过 endTs 后无新行事件时，靠心跳时间戳兜底退出（60s 太久）
-        ->withHeartbeatPeriod(5)
+        // 心跳 2s：历史窗口越过 endTs 后无新行事件时，靠心跳时间戳兜底退出。
+        // 原 5s 导致即使无数据也需等 ~5s 才能结束 dump，用户体验为"至少卡 5 秒"。
+        ->withHeartbeatPeriod(2)
         ->withEventsOnly([
             ConstEventType::WRITE_ROWS_EVENT_V2->value,
             ConstEventType::UPDATE_ROWS_EVENT_V2->value,
@@ -349,8 +350,8 @@ $binLogStream->registerSubscriber(
             emit(['type' => 'heartbeat', 'ts' => (int) (microtime(true) * 1000)]);
             // 兜底退出：心跳 = binlog 空闲（已追平当前文件尾）。krowinski 心跳事件
             // 的 eventInfo->timestamp 恒为 0（库实现如此），故用本地时间判断：
-            // 窗口终点已过去（endTs+5s 缓冲）→ 不会再有窗口内新事件，正常退出
-            if ($st->endTs > 0 && time() > $st->endTs + 5) {
+            // 窗口终点已过去（endTs+2s 缓冲）→ 不会再有窗口内新事件，正常退出
+            if ($st->endTs > 0 && time() > $st->endTs + 2) {
                 exit(0);
             }
         }

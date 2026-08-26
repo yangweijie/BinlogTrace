@@ -15,22 +15,11 @@ import type {
 } from '../types/api';
 import type { StartDumpOptions } from './session';
 
-/** 代理地址默认值；可通过构造参数覆盖（连接页填写的 host/port） */
+/** 代理地址默认值（binlog-agent）；由构造参数 agentUrl 覆盖，与 MySQL 主机/端口无关 */
 const DEFAULT_BASE = 'http://127.0.0.1:8080';
 
 function rid(): string {
   return 'c' + Math.random().toString(36).slice(2, 10);
-}
-
-/** 根据 host/port 拼出代理基地址，缺省回退到默认值 */
-function buildBase(host: string | undefined, port: number | undefined): string {
-  if (host && host.trim()) {
-    const h = host.trim();
-    const p = port && Number.isFinite(port) ? `:${port}` : '';
-    const scheme = h.startsWith('http://') || h.startsWith('https://') ? '' : 'http://';
-    return `${scheme}${h}${p}`;
-  }
-  return DEFAULT_BASE;
 }
 
 export interface WsHandlers {
@@ -56,9 +45,11 @@ export class WsClient {
   private base: string;
   private abort: AbortController | null = null;
 
-  constructor(handlers: WsHandlers, opts?: { host?: string; port?: number }) {
+  constructor(handlers: WsHandlers, opts?: { agentUrl?: string; host?: string; port?: number }) {
     this.handlers = handlers;
-    this.base = buildBase(opts?.host, opts?.port);
+    // 代理基地址固定取 agentUrl，不得用 MySQL 的 host/port 拼接，
+    // 否则请求会打到数据库端口（如 http://127.0.0.1:3306/connect）。
+    this.base = opts?.agentUrl?.trim() || DEFAULT_BASE;
   }
 
   /** 建立连接：POST /connect，读取 JSON 响应，返回 connected 载荷（含 session token） */
@@ -69,8 +60,6 @@ export class WsClient {
     password: string;
     database?: string;
   }): Promise<ConnectedPayload> {
-    // 以本次连接的 host/port 为准（覆盖构造默认值）
-    this.base = buildBase(opts.host, opts.port);
     const frame: Frame = {
       v: 2,
       id: rid(),

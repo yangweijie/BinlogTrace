@@ -4,6 +4,8 @@
 export interface SavedConnection {
   id: string;
   name: string;
+  /** 代理（binlog-agent）地址，例如 http://127.0.0.1:8080；与 MySQL 主机/端口分离 */
+  agentUrl: string;
   host: string;
   port: number;
   user: string;
@@ -14,6 +16,8 @@ export interface SavedConnection {
 /** 连接表单原始输入（密码仅勾选"保存到本地"才写入 SavedConnection） */
 export interface ConnectionForm {
   name: string;
+  /** 代理（binlog-agent）地址，默认 http://127.0.0.1:8080 */
+  agentUrl: string;
   host: string;
   port: string;
   user: string;
@@ -138,7 +142,7 @@ export type ChangeType = 'insert' | 'update' | 'delete';
 
 export interface TraceConfig {
   db: string;
-  table: string; // '全部' 或表名
+  table: string[]; // 多选表名；含 '全部' 表示不限制
   start: string; // datetime-local 值
   end: string;
   types: ChangeType[];

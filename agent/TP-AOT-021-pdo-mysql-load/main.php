@@ -37,12 +37,10 @@ function main(): void
 
     echo "\n--- try new \\PDO('mysql:host=127.0.0.1;port=3306') ---\n";
     try {
-        $pdo = new \PDO('mysql:host=127.0.0.1;port=3306;charset=utf8mb4');
+        $pdo = new \PDO('mysql:host=127.0.0.1;user=root;password=root;port=3306;charset=utf8mb4');
         echo "PDO mysql constructed OK (driver present)\n";
     } catch (\Throwable $e) {
         echo 'PDO construct FAILED: ' . $e->getMessage() . "\n";
         echo 'exception: ' . get_class($e) . "\n";
     }
 }
-
-main();

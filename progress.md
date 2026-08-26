@@ -117,3 +117,49 @@
 - `frontend/src/workers/demo-parse.ts`、`frontend/src/hooks/useTraceRun.ts`、`frontend/src/lib/demo-data.ts`（新）
 - `frontend/src/components/MultiSelect.tsx`、`frontend/src/styles/table.css`
 - `frontend/src/pages/ResultPage.tsx`、`frontend/src/pages/RollbackPage.tsx`、`frontend/src/hooks/useSchemaMeta.ts`
+
+## Session 2026-08-26（下午场：代理 ping 状态 / 数据表多选 / 回滚事务开关）
+
+### 已完成
+- [x] **代理 ping 状态修复**（ping 成功仍显示「代理未连接」）
+  - 根因：`setAgentReachable` action 不存 ping 结果（仅误改 wsStatus），TopBar status 由各页面按 wsStatus/wsMeta/demoMode 派生，从不读 ping 结果。首次进首页 wsStatus=idle → 「代理未连接」。
+  - `AppState` 新增 `agentReachable: boolean | null`；`setAgentReachable` 改为纯粹记录可达性。
+  - 新增导出 `deriveTopStatus(state)` 统一派生（demo > WS connected/wsMeta > agentReachable=true > agentReachable=false > WS error > idle）。
+  - 四页面（ConnectPage/TracePage/RollbackPage/ResultPage）TopBar status 改为 `deriveTopStatus(state)`。
+  - 补 7 条 `deriveTopStatus.test.ts` 单测。
+- [x] **数据表选择器从单选改为多选**（全部与具体表互斥）
+  - `TraceConfig.table: string` → `string[]`。
+  - TracePage：`Select` → `MultiSelect`；onChange 互斥逻辑（选「全部」只留「全部」，选具体表去掉「全部」，全空回退「全部」）；state 初始化兼容旧字符串持久化。
+  - ResultPage：表筛选器同样改为 MultiSelect + 同互斥逻辑；筛选匹配改为 `Set.has()` 任一即通过。
+  - `useTraceRun.buildQueryString`：含「全部」/空时不传 table 参数（后端返回所有表，前端过滤）；demo metadata tables 改为多表映射。
+- [x] **MultiSelect 组件两轮 bug 修复**
+  - `values=` 误写为 `value`（组件 props 是 `value`）→ 运行时 `value.length` undefined 崩溃；统一改为 `value=`。
+  - `options` 类型原只支持 `string[]`，调用处传 `{value,label}[]` 导致「Objects are not valid as React child」；改为支持 `string | {value,label}` 两种格式（`optValue/optLabel`）。
+  - 新增 `label` prop：传入时渲染 `.field > label + div.multi-select` 结构（与 Select 对齐），面板 absolute 定位不受影响。
+  - 新增 `id` prop（便于 CSS 单独定位） + `exclusiveOption` prop（互斥逻辑内聚到组件内部 toggle，避免外部 onChange 把新增值又强制回退「全部」导致「点不动」）。
+  - `.multi-select-trigger` 高度从 26px → 36px（与原生 `.select` 一致）。
+  - ResultPage 筛选栏 `.filter-bar .multi-select-trigger` 覆写 26px（与 `.select-sm` 一致），两个筛选器对齐。
+- [x] **dump 接口 5 秒卡顿**：`agent-workerman/bin/krowinski_dump.php` 心跳 `withHeartbeatPeriod(5)` → `2`；兜底退出 `endTs+5` → `endTs+2`。
+- [x] **时间筛选去除 48 小时限制 + 快捷按钮扩充**
+  - TracePage `validateRange` 删 `e - s > 48 * 3600_000` 校验。
+  - 快捷按钮新增「近48小时」(48) / 「近一周」(168)；`activeHours` 匹配列表同步 `[1,6,24,48,168]`。
+- [x] **回滚 SQL 独立事务开关**
+  - `rollback-gen.generateRollback(changes, independentTx=false)`：共享事务（首尾各一次 START/COMMIT）vs 独立事务（每 xid 组各自包裹）；stats.transactions 同步调整。
+  - `parser-client.generateRollbackScript(changesJson, independentTx)` + Worker 透传。
+  - RollbackPage：新增 `independentTx` state（默认 false）；工具栏加 checkbox「独立回滚（每条变更单独事务）」；切换 checkbox 重新生成（useEffect 依赖含 independentTx）。
+
+### 遇到的错误与解决方案（本轮）
+| 错误/现象 | 根因 | 解决方案 |
+|-----------|------|----------|
+| ping 成功仍「代理未连接」 | setAgentReachable 不存结果，TopBar 不读 ping | AppState 加 agentReachable + deriveTopStatus 统一派生 |
+| TracePage 崩溃 `value.length` undefined | 调用处用 `values=` 而组件 prop 是 `value` | 统一改为 `value=` |
+| MultiSelect 「Objects are not valid as React child」 | options 传 {value,label} 但组件只支持 string[] | 支持两种格式 + optValue/optLabel |
+| 多选点具体表「点不动」 | 外部 onChange 检测到含「全部」又强制回退，抵消 toggle | 互斥逻辑移入组件 internal toggle（exclusiveOption） |
+| 多选下拉与左侧 Select 高度不一致 | trigger 26px vs select 36px | trigger 改 36px；ResultPage 筛选栏覆写 26px |
+| dump 接口至少卡 5 秒 | `withHeartbeatPeriod(5)` 心跳间隔 + 兜底 exit endTs+5 | 改为 2s |
+| 时间筛选被限 48h | validateRange 硬编码 48h 校验 | 删除校验 |
+| 多条回滚每条都包事务 | generateRollback 每 xid 组包 START/COMMIT | 加 independentTx 开关，默认共享事务 |
+
+### 验证
+- 前端 `vitest run`：28 passed / 0 fail；`read_lints` 0 错误（本轮累计 28 测试全过，0 lint）。
+- 修改文件：`frontend/src/context/AppContext.tsx`、`frontend/src/hooks/useAgentPing.ts`、`frontend/src/pages/{ConnectPage,TracePage,RollbackPage,ResultPage}.tsx`、`frontend/src/components/MultiSelect.tsx`、`frontend/src/lib/{rollback-gen,parser-client}.ts`、`frontend/src/workers/parser.worker.ts`、`frontend/src/styles/{table,components}.css`、`frontend/src/types/api.d.ts`、`agent-workerman/bin/krowinski_dump.php`

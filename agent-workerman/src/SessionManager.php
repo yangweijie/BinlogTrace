@@ -30,4 +30,9 @@ final class SessionManager
     {
         unset(self::$sessions[$token]);
     }
+
+    public static function count(): int
+    {
+        return count(self::$sessions);
+    }
 }

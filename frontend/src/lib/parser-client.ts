@@ -51,8 +51,8 @@ export function parseEvents(eventsJson: string, demo: boolean): Promise<ParseRes
   return call<ParseResult>('parse', { eventsJson, demo });
 }
 
-export function generateRollbackScript(changesJson: string): Promise<RollbackResult> {
-  return call<RollbackResult>('generate', { changesJson });
+export function generateRollbackScript(changesJson: string, independentTx = false): Promise<RollbackResult> {
+  return call<RollbackResult>('generate', { changesJson, independentTx });
 }
 
 export function checkConfig(metaJson: string): Promise<CheckResult> {

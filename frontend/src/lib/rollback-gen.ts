@@ -144,7 +144,7 @@ function rollbackComment(c: Change, xid: number): string[] {
   return lines;
 }
 
-export function generateRollback(changes: Change[]): RollbackOutput {
+export function generateRollback(changes: Change[], independentTx = false): RollbackOutput {
   if (changes.length === 0) {
     return { ok: false, sql: '', stats: { statements: 0, transactions: 0 }, error: '未生成回滚脚本：当前没有选中的变更。请返回变更列表页勾选需要回滚的记录。' };
   }
@@ -168,20 +168,34 @@ export function generateRollback(changes: Change[]): RollbackOutput {
   const blocks: string[] = [header];
   let statements = 0;
 
-  ordered.forEach(([xid, group]) => {
-    const lines: string[] = ['START TRANSACTION;'];
-    group.forEach((c) => {
-      lines.push(...rollbackComment(c, xid));
-      lines.push(rollbackStatement(c));
-      statements += 1;
+  if (independentTx) {
+    // 独立事务模式：每个 xid 组各自 START TRANSACTION / COMMIT
+    ordered.forEach(([xid, group]) => {
+      const lines: string[] = ['START TRANSACTION;'];
+      group.forEach((c) => {
+        lines.push(...rollbackComment(c, xid));
+        lines.push(rollbackStatement(c));
+        statements += 1;
+      });
+      lines.push('COMMIT;');
+      blocks.push(lines.join('\n'));
     });
-    lines.push('COMMIT;');
-    blocks.push(lines.join('\n'));
-  });
+  } else {
+    // 共享事务模式：所有变更共用一个事务（仅首尾各一次）
+    blocks.push('START TRANSACTION;');
+    ordered.forEach(([xid, group]) => {
+      group.forEach((c) => {
+        blocks.push(...rollbackComment(c, xid));
+        blocks.push(rollbackStatement(c));
+        statements += 1;
+      });
+    });
+    blocks.push('COMMIT;');
+  }
 
   return {
     ok: true,
     sql: blocks.join('\n\n'),
-    stats: { statements, transactions: ordered.length },
+    stats: { statements, transactions: independentTx ? ordered.length : 1 },
   };
 }

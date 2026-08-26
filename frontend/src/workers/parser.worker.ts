@@ -63,10 +63,12 @@ async function handle(req: WorkerRequest): Promise<unknown> {
   }
 
   if (req.cmd === 'generate') {
+    const independentTx = req.payload.independentTx === true;
     if (api) {
-      return JSON.parse(await api.generateRollback(String(req.payload.changesJson)));
+      // WASM 路径暂不支持 independentTx（WASM 接口固定），回退到 TS 实现
+      return generateRollback(JSON.parse(String(req.payload.changesJson)), independentTx);
     }
-    return generateRollback(JSON.parse(String(req.payload.changesJson)));
+    return generateRollback(JSON.parse(String(req.payload.changesJson)), independentTx);
   }
 
   // parse

@@ -3,12 +3,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, SearchX, WandSparkles } from 'lucide-react';
 import TopBar from '../components/TopBar';
 import Button from '../components/Button';
-import Select from '../components/Select';
 import MultiSelect from '../components/MultiSelect';
 import TypePill from '../components/TypePill';
 import EmptyState from '../components/EmptyState';
 import ChangeDetailModal from '../components/ChangeDetailModal';
-import { useAppState } from '../context/AppContext';
+import { useAppDispatch, useAppState, deriveTopStatus } from '../context/AppContext';
+import { useAgentPing } from '../hooks/useAgentPing';
 import { loadChanges } from '../lib/change-cache';
 import { useRoute, navigate, buildQuery } from '../lib/route';
 import { formatTime, formatCount, epochMs, formatLocalInput } from '../lib/format';
@@ -91,11 +91,14 @@ function primaryKey(change: Change): string {
 }
 
 export default function ResultPage() {
-  const { changes: ctxChanges, parseStatus, parseError, demoMode, wsMeta } = useAppState();
+  const state = useAppState();
+  const { changes: ctxChanges, parseStatus, parseError, demoMode, wsMeta, agentUrl } = state;
+  const dispatch = useAppDispatch();
+  useAgentPing();
   const route = useRoute();
   const [cached] = useState<Change[] | null>(() => loadChanges());
   const [typeFilter, setTypeFilter] = useState<string>('all');
-  const [tableFilter, setTableFilter] = useState<string>('全部');
+  const [tableFilter, setTableFilter] = useState<string[]>(['全部']);
   const [columnFilter, setColumnFilter] = useState<string[]>([]);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState(-1);
@@ -114,10 +117,11 @@ export default function ResultPage() {
   const tablesSet = useMemo(() => new Set(changes.map((c) => c.table)), [changes]);
   const isMultiTable = tablesSet.size > 1;
   const visibleChanges = useMemo(() => {
-    if (tableFilter === '全部') return changes;
-    return changes.filter((c) => c.table === tableFilter);
+    if (tableFilter.includes('全部') || tableFilter.length === 0) return changes;
+    const set = new Set(tableFilter);
+    return changes.filter((c) => set.has(c.table));
   }, [changes, tableFilter]);
-  const showColumnGroups = tableFilter === '全部' && isMultiTable;
+  const showColumnGroups = (tableFilter.includes('全部') || tableFilter.length > 1) && isMultiTable;
   const columnOptions = useMemo(
     () => (showColumnGroups ? [] : collectColumns(visibleChanges)),
     [visibleChanges, showColumnGroups],
@@ -131,7 +135,7 @@ export default function ResultPage() {
     () =>
       changes.filter((c) => {
         if (typeFilter !== 'all' && c.type !== typeFilter) return false;
-        if (tableFilter !== '全部' && c.table !== tableFilter) return false;
+        if (!tableFilter.includes('全部') && tableFilter.length > 0 && !tableFilter.includes(c.table)) return false;
         return matchColumnFilter(c, columnFilter);
       }),
     [changes, typeFilter, tableFilter, columnFilter],
@@ -214,7 +218,12 @@ export default function ResultPage() {
   return (
     <div>
       <TopBar
-        status={demoMode ? 'demo' : wsMeta ? 'connected' : 'idle'}
+        status={deriveTopStatus(state)}
+        agentUrl={agentUrl}
+        onAgentUrlChange={(url, reachable) => {
+          dispatch({ type: 'setAgentUrl', url });
+          if (reachable === false) dispatch({ type: 'setStatus', status: 'error' });
+        }}
         left={
           <button type="button" className="btn btn-ghost" style={{ padding: 'var(--spacing-xs)' }} onClick={() => navigate('/trace')} aria-label="返回工单页">
             <ArrowLeft size={16} aria-hidden="true" />
@@ -261,14 +270,16 @@ export default function ResultPage() {
                   </button>
                 ))}
               </div>
-              <Select
-                aria-label="按表筛选"
+              <MultiSelect
+                id="table-filter-ms"
+                ariaLabel="按表筛选"
                 value={tableFilter}
-                onChange={(e) => setTableFilter(e.target.value)}
+                onChange={setTableFilter}
+                exclusiveOption="全部"
                 options={allTables.map((t) => ({ value: t, label: t }))}
-                className="select-sm"
               />
               <MultiSelect
+                id="column-filter-ms"
                 ariaLabel="按列筛选"
                 value={columnFilter}
                 onChange={setColumnFilter}

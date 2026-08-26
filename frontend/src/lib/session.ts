@@ -28,7 +28,7 @@ export class TraceSession {
   private lastError: ErrorPayload | null = null;
   private listeners = new Set<() => void>();
 
-  constructor(demo: boolean, simulate?: DemoSimulateOptions) {
+  constructor(demo: boolean, simulate?: DemoSimulateOptions, agentUrl?: string) {
     const handlers: WsHandlers = {
       onEvent: (p) => {
         this.buffer.push(p);
@@ -55,7 +55,7 @@ export class TraceSession {
         this.emit();
       },
     };
-    this.agent = demo ? new MockAgent(handlers) : new WsClient(handlers);
+    this.agent = demo ? new MockAgent(handlers) : new WsClient(handlers, { agentUrl });
     if (demo && this.agent instanceof MockAgent) {
       this.agent.setSimulate(simulate ?? {});
     }
@@ -107,8 +107,8 @@ export class TraceSession {
 
 let current: TraceSession | null = null;
 
-export function createSession(demo: boolean, simulate?: DemoSimulateOptions): TraceSession {
-  current = new TraceSession(demo, simulate);
+export function createSession(demo: boolean, simulate?: DemoSimulateOptions, agentUrl?: string): TraceSession {
+  current = new TraceSession(demo, simulate, agentUrl);
   return current;
 }
 

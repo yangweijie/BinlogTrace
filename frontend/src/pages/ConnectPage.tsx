@@ -8,7 +8,8 @@ import Button from '../components/Button';
 import Checkbox from '../components/Checkbox';
 import EmptyState from '../components/EmptyState';
 import CheckResultPanel from '../components/CheckResultPanel';
-import { useAppDispatch, useAppState } from '../context/AppContext';
+import { useAppDispatch, useAppState, deriveTopStatus } from '../context/AppContext';
+import { useAgentPing } from '../hooks/useAgentPing';
 import { createSession } from '../lib/session';
 import { checkConfig } from '../lib/parser-client';
 import { loadConnections, upsertConnection, removeConnection, newId } from '../lib/storage';
@@ -39,7 +40,9 @@ function validate(form: ConnectionForm): Record<string, string> {
 
 export default function ConnectPage() {
   const dispatch = useAppDispatch();
-  const { wsStatus, wsError, checkResult } = useAppState();
+  const state = useAppState();
+  const { wsStatus, wsError, checkResult, agentUrl } = state;
+  useAgentPing();
   const [form, setForm] = useState<ConnectionForm>(DEFAULT_FORM);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saved, setSaved] = useState<SavedConnection[]>(() => loadConnections());
@@ -54,10 +57,24 @@ export default function ConnectPage() {
 
   const fieldError = (key: string): string => errors[key] ?? '';
 
-  const doConnect = async (opts: { save: boolean; thenNavigate: boolean }): Promise<void> => {
+  /** 已保存连接的一键连接可传入 override 绕过表单 state 竞态（setForm 尚未 flush 时 doConnect 就读了旧值） */
+  const doConnect = async (
+    opts: { save: boolean; thenNavigate: boolean },
+    override?: Pick<ConnectionForm, 'agentUrl' | 'host' | 'port' | 'user' | 'password' | 'database' | 'useDemo'>,
+  ): Promise<void> => {
+    // 合并覆盖值（一键连接时用保存的数据；表单提交时用当前 state）
+    const effective = {
+      agentUrl: override?.agentUrl ?? form.agentUrl,
+      host: override?.host ?? form.host,
+      port: override?.port ?? form.port,
+      user: override?.user ?? form.user,
+      password: override?.password ?? form.password,
+      database: override?.database ?? form.database,
+      useDemo: override?.useDemo ?? form.useDemo,
+    };
     // 演示模式无需真实凭证，跳过必填校验
-    if (!form.useDemo) {
-      const errs = validate(form);
+    if (!effective.useDemo) {
+      const errs = validate({ ...form, ...effective });
       setErrors(errs);
       if (Object.keys(errs).length > 0) {
         dispatch({ type: 'setStatus', status: 'error', error: '请修正表单中的必填项。' });
@@ -68,32 +85,33 @@ export default function ConnectPage() {
     setTestOk(false);
     dispatch({ type: 'setStatus', status: 'connecting', error: null });
     try {
-      const session = createSession(form.useDemo, demoSim);
+      const session = createSession(effective.useDemo, demoSim, agentUrl.trim() || 'http://127.0.0.1:8080');
       const meta = await session.agent.connect({
-        host: form.host.trim(),
-        port: Number(form.port),
-        user: form.user.trim(),
-        password: form.password,
-        database: form.database.trim() || undefined,
+        host: effective.host.trim(),
+        port: Number(effective.port),
+        user: effective.user.trim(),
+        password: effective.password,
+        database: effective.database.trim() || undefined,
       });
       // 同名本地连接覆盖而非追加：先按 name 查找已存条目的 id，有则复用
-      const connName = form.name.trim() || `${form.host.trim()}:${form.port}`;
+      const connName = form.name.trim() || `${effective.host.trim()}:${effective.port}`;
       const existingId = saved.find((c) => c.name === connName)?.id;
       const connection: SavedConnection = {
         id: existingId ?? newId(),
         name: connName,
-        host: form.host.trim(),
-        port: Number(form.port),
-        user: form.user.trim(),
-        database: form.database.trim() || undefined,
+        agentUrl: agentUrl.trim() || 'http://127.0.0.1:8080',
+        host: effective.host.trim(),
+        port: Number(effective.port),
+        user: effective.user.trim(),
+        database: effective.database.trim() || undefined,
       };
       dispatch({ type: 'setStatus', status: 'connected', error: null });
-      dispatch({ type: 'setConnection', connection, meta, demoMode: form.useDemo });
+      dispatch({ type: 'setConnection', connection, meta, demoMode: effective.useDemo });
       const result = await checkConfig(toCheckMeta(meta));
       dispatch({ type: 'setCheck', result });
       setTestOk(true);
       if (opts.save && form.saveLocally) {
-        setSaved(upsertConnection({ ...connection, password: form.password || undefined }));
+        setSaved(upsertConnection({ ...connection, password: effective.password || undefined }));
       }
       if (opts.thenNavigate) navigate('/trace');
     } catch (err) {
@@ -115,12 +133,30 @@ export default function ConnectPage() {
       saveLocally: false,
       useDemo: false,
     });
-    void doConnect({ save: false, thenNavigate: true });
+    // 用 override 直接传入已保存数据，绕过 setForm 尚未 flush 的 state 竞态
+    void doConnect(
+      { save: false, thenNavigate: true },
+      {
+        host: conn.host,
+        port: String(conn.port),
+        user: conn.user,
+        password: conn.password ?? '',
+        database: conn.database ?? '',
+        useDemo: false,
+      },
+    );
   };
 
   return (
     <div>
-      <TopBar status={wsStatus === 'connected' ? 'connected' : wsStatus === 'error' ? 'error' : 'idle'} />
+      <TopBar
+        status={deriveTopStatus(state)}
+        agentUrl={agentUrl}
+        onAgentUrlChange={(url, reachable) => {
+          dispatch({ type: 'setAgentUrl', url });
+          if (reachable === false) dispatch({ type: 'setStatus', status: 'error' });
+        }}
+      />
       <main className="page">
         <div className="connect-grid">
           <Card title="新建连接">
@@ -206,7 +242,7 @@ export default function ConnectPage() {
                   <div>
                     <div className="saved-item-name">{conn.name}</div>
                     <div className="saved-item-sub">
-                      {conn.host}:{conn.port}
+                      {conn.user}@{conn.host}:{conn.port}
                       {conn.database ? ` / ${conn.database}` : ''}
                     </div>
                   </div>

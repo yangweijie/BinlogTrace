@@ -105,3 +105,26 @@ PDO SHOW BINARY LOGS（按名升序 binlog.000040 < ... < 000042，末个=当前
 ### 历史窗起点定位（worker 内，复刻 agent-workerman）
 - `SHOW BINARY LOGS`（PDO）→ `array_reverse` 从新到旧 → 逐文件 krowinski 从 pos 4 取首个行事件 ts → 首个 `ts < startTs` 的文件为起点（pos 4 起，窗口前行被 start-ts 过滤，无遗漏）；全部文件首事件 ≥ startTs → 回退最旧文件。
 - 主 `MySQLReplicationFactory` 经 ROTATE 续读后续文件；`onXID` 缓冲赋 xid 并作时间窗过滤与越界 `exit(0)`（加 `timestamp>0` 守卫防 ts=0 误杀）；`onHeartbeat` 用本地墙钟 `time()>$endTs+5` 兜底退出。
+
+## 代理可达性状态模型（2026-08-26 下午场）
+- 前端不应让 ping 结果污染 `wsStatus`；应独立字段 `agentReachable: boolean | null`，由 `deriveTopStatus` 统一定义优先级：demo > WS connected/wsMeta > agentReachable=true(代理在线) > agentReachable=false(代理异常) > WS error > idle。
+- 四页面（ConnectPage/TracePage/RollbackPage/ResultPage）TopBar `status` 统一改为 `deriveTopStatus(state)`。
+
+## MultiSelect 组件设计约定（2026-08-26 下午场）
+- `options` 支持 `string | {value,label}` 两种格式（`optValue/optLabel` 统一取值，key 用 value 保证唯一）。
+- `label` prop：传入时渲染 `.field > label + div.multi-select`，与 Select 视觉对齐；面板 `position:absolute` 定位不受外层 `.field` 影响。
+- `id` prop：传到根 DOM，便于 CSS 单独定位（如 ResultPage 两个筛选器 `#table-filter-ms` / `#column-filter-ms`）。
+- `exclusiveOption` prop：互斥选项（如「全部」）的互斥逻辑**必须在组件内部 toggle 处理**，不能在外部 onChange 里根据"是否含互斥值"再强制回退——否则会与内部 toggle 新增的值相互抵消（表现为「点不动」具体表）。
+- `.multi-select-trigger` 高度 36px（与原生 `.select` 一致）；`.filter-bar .multi-select-trigger` 覆写 26px（与 `.select-sm` 一致）。
+
+## dump 卡顿根因（2026-08-26 下午场）
+- `agent-workerman/bin/krowinski_dump.php` 心跳 `withHeartbeatPeriod(5)` 决定空窗口兜底退出的最快速度——即使无新事件也要等 ~5s 才发心跳供 `time()>$endTs+5` 判断退出。
+- 修复：`withHeartbeatPeriod(5)`→`2`、兜底 `endTs+5`→`endTs+2`。注意两值需匹配。
+
+## 前端回滚事务开关（2026-08-26 下午场）
+- `rollback-gen.generateRollback(changes, independentTx=false)`：`independentTx=false`（默认，共享事务）→ 所有变更只包一次 `START TRANSACTION;`(开头) / `COMMIT;`(结尾)；`true`（独立回滚）→ 每个 xid 组各自包裹。stats.transactions 同步（共享=1 / 独立=组数）。
+- `parser-client.generateRollbackScript` + `parser.worker.ts` 透传 `independentTx`。
+- RollbackPage 工具栏加 checkbox「独立回滚（每条变更单独事务）」，默认不勾；切换重新生成（useEffect 依赖含 independentTx）。
+
+## 前端验证基线（2026-08-26 下午场）
+- `npx vitest run`：28 passed / 0 fail；`read_lints` 0 错误（本轮所有改动累计）。

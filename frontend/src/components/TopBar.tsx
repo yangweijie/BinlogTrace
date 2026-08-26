@@ -2,14 +2,19 @@
 import type { ReactNode } from 'react';
 import { Database } from 'lucide-react';
 import StatusDot from './StatusDot';
+import AgentConfig, { getStoredAgentUrl } from './AgentConfig';
 
 interface Props {
   status: 'connected' | 'idle' | 'error' | 'demo';
   context?: ReactNode;
   left?: ReactNode;
+  /** 代理地址（受控） */
+  agentUrl?: string;
+  /** 代理地址变更回调；第二个参数为确定时自动 ping 的可达性 */
+  onAgentUrlChange?: (url: string, reachable?: boolean) => void;
 }
 
-export default function TopBar({ status, context, left }: Props) {
+export default function TopBar({ status, context, left, agentUrl, onAgentUrlChange }: Props) {
   return (
     <header className="topbar">
       <div className="topbar-brand">
@@ -28,6 +33,10 @@ export default function TopBar({ status, context, left }: Props) {
         ) : (
           <StatusDot tone="muted" text="代理未连接" />
         )}
+        <AgentConfig
+          value={agentUrl ?? getStoredAgentUrl()}
+          onChange={onAgentUrlChange ?? (() => {})}
+        />
       </div>
     </header>
   );

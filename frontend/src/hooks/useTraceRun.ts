@@ -82,9 +82,11 @@ function stringifyValues(v: Record<string, string | number | null>): Record<stri
 }
 
 function buildQueryString(cfg: TraceConfig): string {
+  // table 为数组：含"全部"或空时不传（后端返回所有表，前端按选中表过滤）
+  const hasAll = cfg.table.includes('全部') || cfg.table.length === 0;
   return buildQuery({
     db: cfg.db,
-    table: cfg.table === '全部' ? '' : cfg.table,
+    table: hasAll ? '' : cfg.table.join(','),
     start: cfg.start,
     end: cfg.end,
     types: cfg.types.join(','),
@@ -105,7 +107,7 @@ async function finalize(
     events,
     metadata: {
       database: cfg.db,
-      tables: { [`${cfg.db}.${cfg.table}`]: { columns: [] } },
+      tables: Object.fromEntries(cfg.table.filter((t) => t !== '全部').map((t) => [`${cfg.db}.${t}`, { columns: [] }])),
       demo: { count: demoCount, seed: 7, types: cfg.types, startMs, endMs, table: cfg.table },
     },
   });

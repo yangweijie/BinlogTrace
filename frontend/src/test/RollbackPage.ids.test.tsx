@@ -22,7 +22,10 @@ vi.mock('../context/AppContext', () => ({
     changes: mockChanges,
     wsMeta: { user: 'u', password: 'p' },
     demoMode: true,
+    agentUrl: 'http://127.0.0.1:8080',
   }),
+  useAppDispatch: () => vi.fn(),
+  deriveTopStatus: () => 'demo',
 }));
 
 vi.mock('../lib/parser-client', () => ({

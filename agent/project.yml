@@ -4,4 +4,4 @@ output: binlog-agent
 sources:
   - src
 ext-deps:
-  - pdo_mysql
+  - pdo pdo_mysql

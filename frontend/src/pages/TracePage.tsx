@@ -1,14 +1,16 @@
-// TracePage.tsx — 追踪工单页 `/trace`：库/表级联 + 时间范围(≤48h) + 三态类型 + 前置检查阻断/降级放行（AC-03/04/05/13）
+// TracePage.tsx — 追踪工单页 `/trace`：库/表级联 + 时间范围 + 三态类型 + 前置检查阻断/降级放行（AC-03/04/05/13）
 import { useEffect, useState } from 'react';
 import { ArrowLeft, Play } from 'lucide-react';
 import TopBar from '../components/TopBar';
 import Card from '../components/Card';
 import Select from '../components/Select';
+import MultiSelect from '../components/MultiSelect';
 import Input from '../components/Input';
 import Button from '../components/Button';
 import Checkbox, { TYPE_DOTS, TYPE_LABELS } from '../components/Checkbox';
 import CheckResultPanel from '../components/CheckResultPanel';
-import { useAppDispatch, useAppState } from '../context/AppContext';
+import { useAppDispatch, useAppState, deriveTopStatus } from '../context/AppContext';
+import { useAgentPing } from '../hooks/useAgentPing';
 import { useSchemaMeta } from '../hooks/useSchemaMeta';
 import { useTraceRun } from '../hooks/useTraceRun';
 import { saveTraceConfig, loadTraceConfig } from '../lib/storage';
@@ -29,10 +31,17 @@ function formatElapsed(ms: number): string {
 
 export default function TracePage() {
   const dispatch = useAppDispatch();
-  const { connection, wsMeta, checkResult, demoMode, wsStatus } = useAppState();
+  const state = useAppState();
+  const { connection, wsMeta, checkResult, demoMode, wsStatus, agentUrl } = state;
+  useAgentPing();
   const persisted = useRefLoad();
   const [db, setDb] = useState(persisted?.db ?? '');
-  const [table, setTable] = useState(persisted?.table ?? ALL_TABLE);
+  const [table, setTable] = useState<string[]>(() => {
+    const saved = persisted?.table;
+    if (Array.isArray(saved)) return saved;
+    if (typeof saved === 'string' && saved) return [saved];
+    return [ALL_TABLE];
+  });
   const [start, setStart] = useState(persisted?.start ?? hoursAgo(1));
   const [end, setEnd] = useState(persisted?.end ?? '');
   const [types, setTypes] = useState<ChangeType[]>(persisted?.types ?? ['insert', 'update', 'delete']);
@@ -68,7 +77,7 @@ export default function TracePage() {
 
   const onDbChange = (value: string): void => {
     setDb(value);
-    setTable(ALL_TABLE);
+    setTable([ALL_TABLE]);
     if (value) void schema.loadTables(value);
   };
 
@@ -87,7 +96,7 @@ export default function TracePage() {
     const e = parseLocal(end).getTime();
     const now = Date.now();
     if (Math.abs(e - now) >= 60_000) return null; // 结束时间不再是"当前时刻"
-    for (const h of [1, 6, 24]) {
+    for (const h of [1, 6, 24, 48, 168]) {
       if (Math.abs(s - (now - h * 3600_000)) < 60_000) return h;
     }
     return null;
@@ -100,10 +109,7 @@ export default function TracePage() {
       setRangeError('结束时间必须晚于开始时间。');
       return false;
     }
-    if (e - s > 48 * 3600_000) {
-      setRangeError('时间跨度不能超过 48 小时。');
-      return false;
-    }
+
     setRangeError('');
     return true;
   };
@@ -111,7 +117,7 @@ export default function TracePage() {
   const startTrace = async (): Promise<void> => {
     setTypeError(types.length === 0 ? '请至少勾选一种追踪类型。' : '');
     if (types.length === 0 || !validateRange() || !db) return;
-    const cfg: TraceConfig = { db, table: table || ALL_TABLE, start, end, types };
+    const cfg: TraceConfig = { db, table, start, end, types };
     saveTraceConfig(cfg);
     dispatch({ type: 'setTraceConfig', config: cfg });
     if (!wsMeta) {
@@ -126,7 +132,12 @@ export default function TracePage() {
   return (
     <div>
       <TopBar
-        status={demoMode ? 'demo' : wsStatus === 'connected' ? 'connected' : 'error'}
+        status={deriveTopStatus(state)}
+        agentUrl={agentUrl}
+        onAgentUrlChange={(url, reachable) => {
+          dispatch({ type: 'setAgentUrl', url });
+          if (reachable === false) dispatch({ type: 'setStatus', status: 'error' });
+        }}
         left={
           <button type="button" className="btn btn-ghost" style={{ padding: 'var(--spacing-xs)' }} onClick={() => navigate('/')} aria-label="返回连接页">
             <ArrowLeft size={16} aria-hidden="true" />
@@ -146,12 +157,12 @@ export default function TracePage() {
                 placeholder={schema.loading ? '加载中…' : '选择数据库'}
                 disabled={schema.loading || Boolean(schema.error)}
               />
-              <Select
+              <MultiSelect
                 label="数据表"
                 value={table}
-                onChange={(e) => setTable(e.target.value)}
-                options={schema.tableOptions}
-                placeholder={ALL_TABLE}
+                onChange={setTable}
+                exclusiveOption={ALL_TABLE}
+                options={[{ value: ALL_TABLE, label: ALL_TABLE }, ...schema.tableOptions]}
               />
             </div>
             {schema.error ? <p className="field-error">{schema.error}</p> : null}
@@ -165,6 +176,8 @@ export default function TracePage() {
                 { label: '近1小时', hours: 1 },
                 { label: '近6小时', hours: 6 },
                 { label: '近24小时', hours: 24 },
+                { label: '近48小时', hours: 48 },
+                { label: '近一周', hours: 168 },
               ].map((q) => (
                 <button key={q.hours} type="button" className={`quick-tag ${activeHours === q.hours ? 'active' : ''}`} onClick={() => quickRange(q.hours)}>
                   {q.label}

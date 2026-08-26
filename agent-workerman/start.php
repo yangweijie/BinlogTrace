@@ -44,6 +44,19 @@ $worker->onMessage = function (TcpConnection $connection, Request $request) {
         return;
     }
 
+    // GET /ping — 健康检查（无需认证）
+    if ($method === 'GET' && $path === 'ping') {
+        $connection->send(jsonResponse([
+            'ok' => true,
+            'service' => 'binlog-agent-workerman',
+            'version' => \DmsAgent\AgentConstants::VERSION,
+            'ts' => time(),
+            'php' => PHP_VERSION,
+            'sapi' => PHP_SAPI,
+            'sessions' => SessionManager::count(),
+        ]));
+        return;
+    }
     if ($method !== 'POST') {
         $connection->send(jsonResponse(['ok' => false, 'error' => ['code' => 1010, 'message' => '仅支持 POST']], 405));
         return;
