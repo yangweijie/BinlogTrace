@@ -101,6 +101,13 @@ final class MetaGatherer
                     continue;
                 }
                 $grant = (string) (array_values($row)[0] ?? '');
+                if (stripos($grant, 'ALL PRIVILEGES') !== false) {
+                    // 该用户拥有全部权限，直接添加所需三项
+                    $privileges[] = 'SELECT';
+                    $privileges[] = 'REPLICATION SLAVE';
+                    $privileges[] = 'REPLICATION CLIENT';
+                    continue;
+                }
                 if (stripos($grant, 'SELECT') !== false) {
                     $privileges[] = 'SELECT';
                 }
