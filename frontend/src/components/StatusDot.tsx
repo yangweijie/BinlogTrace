@@ -1,5 +1,5 @@
 // StatusDot.tsx — 状态点 + 文案（连接/代理状态徽标）
-type Tone = 'ok' | 'muted' | 'err';
+type Tone = 'ok' | 'muted' | 'err' | 'info';
 
 interface Props {
   tone: Tone;

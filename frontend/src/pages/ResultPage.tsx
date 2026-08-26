@@ -214,7 +214,7 @@ export default function ResultPage() {
   return (
     <div>
       <TopBar
-        status={wsMeta ? 'connected' : 'idle'}
+        status={demoMode ? 'demo' : wsMeta ? 'connected' : 'idle'}
         left={
           <button type="button" className="btn btn-ghost" style={{ padding: 'var(--spacing-xs)' }} onClick={() => navigate('/trace')} aria-label="返回工单页">
             <ArrowLeft size={16} aria-hidden="true" />

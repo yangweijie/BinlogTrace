@@ -43,22 +43,33 @@ interface CollectedEvent {
   serverId: number;
 }
 
-/** agent 侧 krowinski 结构化变更 → 标准 Change（真实模式，绕过 WASM parse-binlog） */
-function structuredToChanges(list: BinlogChangePayload[]): Change[] {
-  return list.map((c, i) => ({
-    changeId: `c${i}`,
-    schema: c.schema,
-    table: c.table,
-    type: c.kind,
-    columns: c.columns,
-    primaryKeys: c.primaryKeys ?? [],
-    oldValues: c.before ? stringifyValues(c.before) : null,
-    newValues: c.after ? stringifyValues(c.after) : null,
-    xid: c.xid,
-    timestamp: c.timestamp,
-    binlogFile: c.binlogFile,
-    binlogPos: c.binlogPos,
-  }));
+/** agent 侧 krowinski 结构化变更 → 标准 Change（真实模式，绕过 WASM parse-binlog）
+ * 可选 winMs=[startMs,endMs]：单次遍历内同时完成窗口过滤与映射，避免 filter+map 两遍 O(n)（#5 优化） */
+export function structuredToChanges(list: BinlogChangePayload[], winMs?: [number, number]): Change[] {
+  const out: Change[] = [];
+  let i = 0;
+  for (const c of list) {
+    if (winMs) {
+      const ms = c.timestamp > 1e11 ? c.timestamp : c.timestamp * 1000;
+      if (ms < winMs[0] || ms > winMs[1]) continue;
+    }
+    out.push({
+      changeId: `c${i}`,
+      schema: c.schema,
+      table: c.table,
+      type: c.kind,
+      columns: c.columns,
+      primaryKeys: c.primaryKeys ?? [],
+      oldValues: c.before ? stringifyValues(c.before) : null,
+      newValues: c.after ? stringifyValues(c.after) : null,
+      xid: c.xid,
+      timestamp: c.timestamp,
+      binlogFile: c.binlogFile,
+      binlogPos: c.binlogPos,
+    });
+    i += 1;
+  }
+  return out;
 }
 
 /** krowinski 值可能为 number（如 id:8），Change 契约要求 string|null */
@@ -117,10 +128,8 @@ function finalizeStructured(
   dispatch({ type: 'setParse', status: 'parsing' });
   const startMs = parseLocal(cfg.start).getTime();
   const endMs = parseLocal(cfg.end).getTime();
-  // 窗口过滤：agent 事件 timestamp 为 epoch 秒，以 1e11 阈值归一化到毫秒比较
-  const toMs = (t: number): number => (t > 1e11 ? t : t * 1000);
-  const inWindow = changes.filter((c) => toMs(c.timestamp) >= startMs && toMs(c.timestamp) <= endMs);
-  const mapped = structuredToChanges(inWindow);
+  // 窗口过滤与映射合并为单遍遍历（#5 优化）
+  const mapped = structuredToChanges(changes, [startMs, endMs]);
   dispatch({ type: 'setParse', status: 'done', changes: mapped, error: null });
   saveChanges(mapped);
   navigate(`/trace/result${buildQueryString(cfg)}`);
@@ -135,15 +144,29 @@ export function useTraceRun(demoMode: boolean) {
   const cancelledRef = useRef(false);
   const unsubRef = useRef<(() => void) | null>(null);
   const demoCountRef = useRef<number>(DEMO_COUNT_PER_HOUR);
+  // #3 优化：增量维护计数/最新时间戳，避免每次回调全量扫描（高频 binlog 流下 O(n)→O(增量)）
+  const latestMsRef = useRef(0);
+  const dmlCountRef = useRef(0);
+  const prevEventsLenRef = useRef(0);
+  const prevChangesLenRef = useRef(0);
 
   const run = async (cfg: TraceConfig, meta: ConnectedPayload): Promise<void> => {
     cfgRef.current = cfg;
     cancelledRef.current = false;
+    latestMsRef.current = 0;
+    dmlCountRef.current = 0;
+    prevEventsLenRef.current = 0;
+    prevChangesLenRef.current = 0;
     clearChanges();
-    const result = await checkConfig(toCheckMeta(meta));
-    dispatch({ type: 'setCheck', result });
-    if (result.errors.length > 0) {
-      return; // AC-03 阻断
+    // 演示模式无需真实 MySQL 前置检查（无代理），直接跳过阻断
+    if (demoMode) {
+      dispatch({ type: 'setCheck', result: { ok: true, errors: [], warnings: [] } });
+    } else {
+      const result = await checkConfig(toCheckMeta(meta));
+      dispatch({ type: 'setCheck', result });
+      if (result.errors.length > 0) {
+        return; // AC-03 阻断
+      }
     }
     const session = getSession();
     if (!session) {
@@ -176,6 +199,12 @@ export function useTraceRun(demoMode: boolean) {
     }
     unsubRef.current?.();
     unsubRef.current = null;
+    // 取消的追踪不应残留结果缓存，避免后续 ResultPage 误读到脏数据（#4 清理）
+    try {
+      clearChanges();
+    } catch {
+      // 忽略清理异常
+    }
     setCollecting(false);
     setProgress(0);
     setPulledCount(0);
@@ -197,41 +226,53 @@ export function useTraceRun(demoMode: boolean) {
       // agent 事件 timestamp 为 epoch 秒，endMs 为毫秒；demo 事件（mock-agent）为毫秒。
       // 以 1e11（1973 年）为阈值归一化到毫秒后再比较，否则真实模式 passedEnd 永不成立
       const toMs = (t: number): number => (t > 1e11 ? t : t * 1000);
+      let passedEnd = false;
       if (demoMode) {
-        // 已拉取条数只统计 DML 事件（30/31/32），与实际"变更"数对齐
-        setPulledCount(events.filter((e) => e.eventType === 30 || e.eventType === 31 || e.eventType === 32).length);
+        // 仅处理本次新增事件（增量），避免每次回调全量扫描
+        const slice = events.slice(prevEventsLenRef.current);
+        prevEventsLenRef.current = events.length;
+        let dml = 0;
+        for (const e of slice) {
+          if (e.eventType === 30 || e.eventType === 31 || e.eventType === 32) dml++;
+          if (toMs(e.timestamp) > endMs) passedEnd = true;
+        }
+        dmlCountRef.current += dml;
+        setPulledCount(dmlCountRef.current);
         setProgress(Math.min(100, Math.round((events.length / demoCountRef.current) * 100)));
       } else {
-        setPulledCount(changes.length);
-        // 预估百分比：按窗口内最新一条变更的时间戳位置估算（0~99；越界由 isEnded/passedEnd 收尾）
-        let latest = 0;
-        for (const c of changes) {
+        // 仅处理本次新增变更（增量），维护最新时间戳用于进度估算
+        const slice = changes.slice(prevChangesLenRef.current);
+        prevChangesLenRef.current = changes.length;
+        for (const c of slice) {
           const ms = toMs(c.timestamp);
-          if (ms > latest) latest = ms;
+          if (ms > latestMsRef.current) latestMsRef.current = ms;
+          if (ms > endMs) passedEnd = true;
         }
+        setPulledCount(changes.length);
         const span = endMs - startMs;
-        if (latest > 0 && span > 0) {
-          setProgress(Math.max(0, Math.min(99, Math.round(((latest - startMs) / span) * 100))));
+        if (latestMsRef.current > 0 && span > 0) {
+          setProgress(Math.max(0, Math.min(99, Math.round(((latestMsRef.current - startMs) / span) * 100))));
         }
       }
-      const passedEnd = demoMode
-        ? events.some((e) => toMs(e.timestamp) > endMs)
-        : changes.some((c) => toMs(c.timestamp) > endMs);
       if (session.isEnded || passedEnd) {
         done = true;
         unsub();
         setCollecting(false);
         if (demoMode) {
-          const mapped: CollectedEvent[] = events
-            .filter((e) => ['table_map', 'write_rows', 'update_rows', 'delete_rows', 'xid'].includes(eventTypeName(e.eventType)))
-            .map((e) => ({
-              type: eventTypeName(e.eventType),
+          const keep = ['table_map', 'write_rows', 'update_rows', 'delete_rows', 'xid'];
+          const mapped: CollectedEvent[] = [];
+          for (const e of events) {
+            const t = eventTypeName(e.eventType);
+            if (!keep.includes(t)) continue;
+            mapped.push({
+              type: t,
               rawBase64: e.raw,
               binlogFile: e.binlogFile,
               binlogPos: e.binlogPos,
               timestamp: e.timestamp,
               serverId: e.serverId,
-            }));
+            });
+          }
           void finalize(mapped, cfg, demoMode, dispatch, demoCountRef.current);
         } else {
           finalizeStructured(changes, cfg, dispatch);
@@ -241,6 +282,11 @@ export function useTraceRun(demoMode: boolean) {
     unsubRef.current = unsub;
     return () => {
       unsub();
+      // #2/#4 修复：组件卸载且仍在采集时，真正关闭底层 SSE 流，避免流泄漏
+      if (!done) {
+        const s = getSession();
+        s?.close();
+      }
       if (unsubRef.current === unsub) unsubRef.current = null;
     };
   }, [collecting, demoMode]);

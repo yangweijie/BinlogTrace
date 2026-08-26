@@ -65,7 +65,6 @@ export function demoParse(eventsJson: string): ParseResult {
     // 全部：按索引散列到该库真实表，保证多表分布均匀
     return realDemoTables[i % realDemoTables.length];
   }
-  const columns = DEFAULT_COLUMNS;
 
   const changes: Change[] = [];
   let idCounter = 0;

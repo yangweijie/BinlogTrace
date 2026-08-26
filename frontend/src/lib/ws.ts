@@ -15,10 +15,22 @@ import type {
 } from '../types/api';
 import type { StartDumpOptions } from './session';
 
-const BASE = 'http://127.0.0.1:8080';
+/** 代理地址默认值；可通过构造参数覆盖（连接页填写的 host/port） */
+const DEFAULT_BASE = 'http://127.0.0.1:8080';
 
 function rid(): string {
   return 'c' + Math.random().toString(36).slice(2, 10);
+}
+
+/** 根据 host/port 拼出代理基地址，缺省回退到默认值 */
+function buildBase(host: string | undefined, port: number | undefined): string {
+  if (host && host.trim()) {
+    const h = host.trim();
+    const p = port && Number.isFinite(port) ? `:${port}` : '';
+    const scheme = h.startsWith('http://') || h.startsWith('https://') ? '' : 'http://';
+    return `${scheme}${h}${p}`;
+  }
+  return DEFAULT_BASE;
 }
 
 export interface WsHandlers {
@@ -41,9 +53,12 @@ interface Frame {
 export class WsClient {
   private handlers: WsHandlers;
   private session = '';
+  private base: string;
+  private abort: AbortController | null = null;
 
-  constructor(handlers: WsHandlers) {
+  constructor(handlers: WsHandlers, opts?: { host?: string; port?: number }) {
     this.handlers = handlers;
+    this.base = buildBase(opts?.host, opts?.port);
   }
 
   /** 建立连接：POST /connect，读取 JSON 响应，返回 connected 载荷（含 session token） */
@@ -54,6 +69,8 @@ export class WsClient {
     password: string;
     database?: string;
   }): Promise<ConnectedPayload> {
+    // 以本次连接的 host/port 为准（覆盖构造默认值）
+    this.base = buildBase(opts.host, opts.port);
     const frame: Frame = {
       v: 2,
       id: rid(),
@@ -63,7 +80,7 @@ export class WsClient {
     };
     let resp: Response;
     try {
-      resp = await fetch(`${BASE}/connect`, {
+      resp = await fetch(`${this.base}/connect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(frame),
@@ -93,7 +110,7 @@ export class WsClient {
       ts: Date.now(),
       payload: { ...payload, session: this.session },
     };
-    void this.streamPost(`${BASE}/dump`, frame);
+    void this.streamPost(`${this.base}/dump`, frame);
   }
 
   /** 只读查询：POST /query，读取 JSON 响应 */
@@ -107,7 +124,7 @@ export class WsClient {
     };
     let resp: Response;
     try {
-      resp = await fetch(`${BASE}/query`, {
+      resp = await fetch(`${this.base}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(frame),
@@ -126,8 +143,11 @@ export class WsClient {
     return (data.payload ?? {}) as T;
   }
 
-  /** 关闭会话：POST /close（不阻塞） */
+  /** 关闭会话：中止 SSE 流并 POST /close（不阻塞） */
   close(): void {
+    // 真正中断仍在进行中的 fetch/SSE 流（#2 修复：此前流无法被中止）
+    this.abort?.abort();
+    this.abort = null;
     const frame: Frame = {
       v: 2,
       id: rid(),
@@ -135,7 +155,7 @@ export class WsClient {
       ts: Date.now(),
       payload: { session: this.session },
     };
-    void fetch(`${BASE}/close`, {
+    void fetch(`${this.base}/close`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(frame),
@@ -144,17 +164,23 @@ export class WsClient {
 
   /** 读取 SSE 流，逐事件解析并分发到 handlers */
   private async streamPost(url: string, frame: Frame): Promise<void> {
+    const ac = new AbortController();
+    this.abort = ac;
     let resp: Response;
     try {
       resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(frame),
+        signal: ac.signal,
       });
     } catch (err) {
+      // 主动 abort 触发的 AbortError 不再派发为错误
+      if (ac.signal.aborted || (err instanceof Error && err.name === 'AbortError')) return;
       this.handlers.onError?.({ code: 1006, message: `追踪请求失败：${err instanceof Error ? err.message : String(err)}` });
       return;
     }
+    if (ac.signal.aborted) return;
     if (!resp.ok || !resp.body) {
       this.handlers.onError?.({ code: 1006, message: `追踪请求失败：HTTP ${resp.status}` });
       return;
@@ -187,10 +213,11 @@ export class WsClient {
         }
       }
     } catch (err) {
+      if (ac.signal.aborted) return;
       this.handlers.onError?.({ code: 1006, message: `追踪流中断：${err instanceof Error ? err.message : String(err)}` });
     }
     // 流结束：通知结束（binlog-end 通常已由服务端显式发送，此处兜底）
-    this.handlers.onClose?.();
+    if (!ac.signal.aborted) this.handlers.onClose?.();
   }
 
   private dispatch(frame: Frame): void {

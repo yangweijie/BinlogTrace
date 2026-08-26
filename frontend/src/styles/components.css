@@ -234,6 +234,10 @@
   background: var(--color-danger);
 }
 
+.status-info {
+  background: var(--color-primary);
+}
+
 /* ---------- 顶栏 ---------- */
 .topbar {
   display: flex;

@@ -55,11 +55,14 @@ export default function ConnectPage() {
   const fieldError = (key: string): string => errors[key] ?? '';
 
   const doConnect = async (opts: { save: boolean; thenNavigate: boolean }): Promise<void> => {
-    const errs = validate(form);
-    setErrors(errs);
-    if (Object.keys(errs).length > 0) {
-      dispatch({ type: 'setStatus', status: 'error', error: '请修正表单中的必填项。' });
-      return;
+    // 演示模式无需真实凭证，跳过必填校验
+    if (!form.useDemo) {
+      const errs = validate(form);
+      setErrors(errs);
+      if (Object.keys(errs).length > 0) {
+        dispatch({ type: 'setStatus', status: 'error', error: '请修正表单中的必填项。' });
+        return;
+      }
     }
     setTesting(true);
     setTestOk(false);

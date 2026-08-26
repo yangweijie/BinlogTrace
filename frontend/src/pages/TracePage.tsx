@@ -126,7 +126,7 @@ export default function TracePage() {
   return (
     <div>
       <TopBar
-        status={wsStatus === 'connected' ? 'connected' : 'error'}
+        status={demoMode ? 'demo' : wsStatus === 'connected' ? 'connected' : 'error'}
         left={
           <button type="button" className="btn btn-ghost" style={{ padding: 'var(--spacing-xs)' }} onClick={() => navigate('/')} aria-label="返回连接页">
             <ArrowLeft size={16} aria-hidden="true" />
@@ -187,7 +187,7 @@ export default function TracePage() {
             ) : null}
 
             <div className="trace-submit">
-              <Button block loading={trace.collecting} disabled={blocking || schema.loading} onClick={() => void startTrace()}>
+              <Button block loading={trace.collecting} disabled={blocking || schema.loading || trace.collecting} onClick={() => void startTrace()}>
                 {trace.collecting ? null : (
                   <>
                     <Play size={16} aria-hidden="true" />

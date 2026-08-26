@@ -12,7 +12,7 @@ import { useRoute, navigate } from '../lib/route';
 import { toast } from '../lib/toast';
 import { splitSqlLines } from '../lib/sql-highlight';
 import { formatCount, formatLocalInput } from '../lib/format';
-import type { Change, RollbackResult } from '../types/binlog';
+import type { RollbackResult } from '../types/binlog';
 
 /** 把 'YYYY-MM-DDTHH:mm' / 'YYYY-MM-DD HH:mm' 压缩成 'YYYYMMDDHHmm' 用于文件名 */
 function compactTime(dt: string): string {
@@ -79,7 +79,12 @@ export default function RollbackPage() {
   const idsParam = route.params.get('ids') ?? '';
 
   const allChanges = useMemo(() => (ctxChanges && ctxChanges.length > 0 ? ctxChanges : cached ?? []), [ctxChanges, cached]);
+  // #9：URL 上的 ids 拼接在 query string 中，巨量勾选会超长（浏览器/服务器 ~2-8KB 上限，极端场景 414）。
+  // 超过阈值时回退为"选中当前过滤条件下的全部变更"（与未勾选语义一致），避免截断丢数据。
+  const IDS_URL_LIMIT = 1500;
+  const idsTooLong = idsParam.length > IDS_URL_LIMIT;
   const selected = useMemo(() => {
+    if (idsTooLong) return allChanges;
     if (changeId) return allChanges.filter((c) => c.changeId === changeId);
     if (idsParam) {
       const ids = idsParam.split(',').filter(Boolean);
@@ -88,7 +93,13 @@ export default function RollbackPage() {
       return ids.filter((id) => byId.has(id)).map((id) => byId.get(id)!);
     }
     return allChanges;
-  }, [allChanges, changeId, idsParam]);
+  }, [allChanges, changeId, idsParam, idsTooLong]);
+
+  useEffect(() => {
+    if (idsTooLong) {
+      toast('勾选数量过多，已自动回退为当前筛选条件下的全部变更生成回滚脚本。');
+    }
+  }, [idsTooLong]);
 
   useEffect(() => {
     let cancelled = false;
@@ -122,7 +133,6 @@ export default function RollbackPage() {
 
   const lineCount = rollback ? splitSqlLines(rollback.sql).length : 0;
   const db = route.params.get('db') ?? selected[0]?.schema ?? '';
-  const table = route.params.get('table') ?? selected[0]?.table ?? '';
   const typesParam = route.params.get('types') ?? 'all';
   const startParam = route.params.get('start') ?? '';
   const endParam = route.params.get('end') ?? '';
@@ -155,7 +165,7 @@ export default function RollbackPage() {
   return (
     <div>
       <TopBar
-        status={wsMeta ? 'connected' : 'idle'}
+        status={demoMode ? 'demo' : wsMeta ? 'connected' : 'idle'}
         left={
           <button type="button" className="btn btn-ghost" style={{ padding: 'var(--spacing-xs)' }} onClick={() => navigate('/trace/result')} aria-label="返回变更列表">
             <ArrowLeft size={16} aria-hidden="true" />
