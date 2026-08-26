@@ -25,7 +25,54 @@ const TYPE_OPTIONS: Array<{ value: string; label: string }> = [
 function collectColumns(changes: Change[]): string[] {
   const set = new Set<string>();
   changes.forEach((c) => c.columns.forEach((col) => set.add(col)));
-  return [...set];
+  return [...set].sort();
+}
+
+interface ColumnOptionGroup {
+  label: string;
+  options: string[];
+}
+
+function collectColumnGroups(changes: Change[]): ColumnOptionGroup[] {
+  const byTable = new Map<string, Set<string>>();
+  changes.forEach((c) => {
+    const set = byTable.get(c.table) ?? new Set();
+    c.columns.forEach((col) => set.add(col));
+    byTable.set(c.table, set);
+  });
+  return [...byTable.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([table, cols]) => ({
+      label: table,
+      options: [...cols].sort().map((col) => `${table}.${col}`),
+    }));
+}
+
+/** 列筛选匹配：同表内字段为"且"，不同表之间为"或" */
+function matchColumnFilter(c: Change, filter: string[]): boolean {
+  if (filter.length === 0) return true;
+  const changed = changedColumns(c);
+  const byTable = new Map<string, string[]>();
+  const bare: string[] = [];
+  for (const f of filter) {
+    const dot = f.indexOf('.');
+    if (dot === -1) {
+      bare.push(f);
+      continue;
+    }
+    const t = f.slice(0, dot);
+    const col = f.slice(dot + 1);
+    const arr = byTable.get(t) ?? [];
+    arr.push(col);
+    byTable.set(t, arr);
+  }
+  // 裸列名：任意表包含所有勾选列即匹配
+  if (bare.length > 0 && bare.every((col) => changed.includes(col))) return true;
+  // 按表分组：组内"且"，组间"或"
+  for (const [t, cols] of byTable) {
+    if (c.table === t && cols.every((col) => changed.includes(col))) return true;
+  }
+  return false;
 }
 
 /** 该变更**实际发生变化的列**：update=before/after 不同，insert=newValues 列，delete=oldValues 列 */
@@ -60,17 +107,32 @@ export default function ResultPage() {
     return cached ?? [];
   }, [ctxChanges, cached]);
 
-  const allTables = useMemo(() => ['全部', ...new Set(changes.map((c) => c.table))], [changes]);
-  const allColumns = useMemo(() => ['全部', ...collectColumns(changes)], [changes]);
+  const allTables = useMemo(() => {
+    const dataTables = [...new Set(changes.map((c) => c.table ?? '').filter((t) => t !== '' && t !== '全部'))];
+    return ['全部', ...dataTables];
+  }, [changes]);
+  const tablesSet = useMemo(() => new Set(changes.map((c) => c.table)), [changes]);
+  const isMultiTable = tablesSet.size > 1;
+  const visibleChanges = useMemo(() => {
+    if (tableFilter === '全部') return changes;
+    return changes.filter((c) => c.table === tableFilter);
+  }, [changes, tableFilter]);
+  const showColumnGroups = tableFilter === '全部' && isMultiTable;
+  const columnOptions = useMemo(
+    () => (showColumnGroups ? [] : collectColumns(visibleChanges)),
+    [visibleChanges, showColumnGroups],
+  );
+  const columnGroups = useMemo(
+    () => (showColumnGroups ? collectColumnGroups(visibleChanges) : []),
+    [visibleChanges, showColumnGroups],
+  );
 
   const filtered = useMemo(
     () =>
       changes.filter((c) => {
         if (typeFilter !== 'all' && c.type !== typeFilter) return false;
         if (tableFilter !== '全部' && c.table !== tableFilter) return false;
-        // 多选"且"语义：变更必须同时包含所有勾选的变化列
-        if (columnFilter.length > 0 && !columnFilter.every((col) => c.columns.includes(col))) return false;
-        return true;
+        return matchColumnFilter(c, columnFilter);
       }),
     [changes, typeFilter, tableFilter, columnFilter],
   );
@@ -83,6 +145,11 @@ export default function ResultPage() {
     setPage(1);
     setSelected(-1);
   }, [typeFilter, tableFilter, columnFilter]);
+
+  // 切换表筛选时清空列筛选：多表/单表的列选项格式不同，避免状态不一致
+  useEffect(() => {
+    setColumnFilter([]);
+  }, [tableFilter]);
 
   const goto = (p: number): void => {
     setPage(p);
@@ -132,7 +199,16 @@ export default function ResultPage() {
 
   const onGenRollback = (): void => {
     const ids = rollbackTarget.map((c) => c.changeId).join(',');
-    navigate(`/rollback${buildQuery({ db: traceDb, table: traceTable, types: 'all', ids })}`);
+    navigate(
+      `/rollback${buildQuery({
+        db: traceDb,
+        table: traceTable,
+        types: typeFilter,
+        start: traceStart,
+        end: traceEnd,
+        ids,
+      })}`,
+    );
   };
 
   return (
@@ -196,7 +272,8 @@ export default function ResultPage() {
                 ariaLabel="按列筛选"
                 value={columnFilter}
                 onChange={setColumnFilter}
-                options={allColumns.filter((c) => c !== '全部')}
+                options={columnOptions}
+                groups={columnGroups}
                 placeholder="按列筛选"
                 className="select-sm"
               />

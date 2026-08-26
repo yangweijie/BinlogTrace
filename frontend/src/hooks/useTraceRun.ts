@@ -10,7 +10,12 @@ import { parseLocal } from '../lib/format';
 import type { TraceConfig, ConnectedPayload, BinlogChangePayload } from '../types/api';
 import type { Change } from '../types/binlog';
 
-export const DEMO_COUNT = 1284;
+export const DEMO_COUNT_PER_HOUR = 100;
+
+function calcDemoCount(startMs: number, endMs: number): number {
+  const hours = Math.max(0, endMs - startMs) / 3600_000;
+  return Math.max(1, Math.round(DEMO_COUNT_PER_HOUR * hours));
+}
 
 function eventTypeName(t: number): string {
   switch (t) {
@@ -80,6 +85,7 @@ async function finalize(
   cfg: TraceConfig,
   demoMode: boolean,
   dispatch: ReturnType<typeof useAppDispatch>,
+  demoCount: number,
 ): Promise<void> {
   dispatch({ type: 'setParse', status: 'parsing' });
   const startMs = parseLocal(cfg.start).getTime();
@@ -89,7 +95,7 @@ async function finalize(
     metadata: {
       database: cfg.db,
       tables: { [`${cfg.db}.${cfg.table}`]: { columns: [] } },
-      demo: { count: DEMO_COUNT, seed: 7, types: cfg.types, startMs, endMs },
+      demo: { count: demoCount, seed: 7, types: cfg.types, startMs, endMs, table: cfg.table },
     },
   });
   try {
@@ -128,6 +134,7 @@ export function useTraceRun(demoMode: boolean) {
   const cfgRef = useRef<TraceConfig | null>(null);
   const cancelledRef = useRef(false);
   const unsubRef = useRef<(() => void) | null>(null);
+  const demoCountRef = useRef<number>(DEMO_COUNT_PER_HOUR);
 
   const run = async (cfg: TraceConfig, meta: ConnectedPayload): Promise<void> => {
     cfgRef.current = cfg;
@@ -145,11 +152,13 @@ export function useTraceRun(demoMode: boolean) {
     }
     const startMs = parseLocal(cfg.start).getTime();
     const endMs = parseLocal(cfg.end).getTime();
+    const demoCount = demoMode ? calcDemoCount(startMs, endMs) : 0;
+    demoCountRef.current = demoMode ? demoCount : DEMO_COUNT_PER_HOUR;
     session.startDump({
       binlogFile: meta.binlogFile ?? 'mysql-bin.000001',
       binlogPos: meta.binlogPos ?? 4,
       slaveFlags: 0,
-      demoCount: demoMode ? DEMO_COUNT : 0,
+      demoCount,
       startMs,
       endMs,
     });
@@ -191,7 +200,7 @@ export function useTraceRun(demoMode: boolean) {
       if (demoMode) {
         // 已拉取条数只统计 DML 事件（30/31/32），与实际"变更"数对齐
         setPulledCount(events.filter((e) => e.eventType === 30 || e.eventType === 31 || e.eventType === 32).length);
-        setProgress(Math.min(100, Math.round((events.length / DEMO_COUNT) * 100)));
+        setProgress(Math.min(100, Math.round((events.length / demoCountRef.current) * 100)));
       } else {
         setPulledCount(changes.length);
         // 预估百分比：按窗口内最新一条变更的时间戳位置估算（0~99；越界由 isEnded/passedEnd 收尾）
@@ -223,7 +232,7 @@ export function useTraceRun(demoMode: boolean) {
               timestamp: e.timestamp,
               serverId: e.serverId,
             }));
-          void finalize(mapped, cfg, demoMode, dispatch);
+          void finalize(mapped, cfg, demoMode, dispatch, demoCountRef.current);
         } else {
           finalizeStructured(changes, cfg, dispatch);
         }

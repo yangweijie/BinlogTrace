@@ -2,6 +2,7 @@
 // 输出结构对齐 04-架构细化 §2.3 ParseResult
 
 import type { ParseResult, Change } from '../types/binlog';
+import { DEMO_TABLES, DEMO_TABLE_COLUMNS } from '../lib/demo-data';
 
 interface DemoMeta {
   count?: number;
@@ -9,6 +10,7 @@ interface DemoMeta {
   types?: Array<'insert' | 'update' | 'delete'>;
   startMs?: number;
   endMs?: number;
+  table?: string;
 }
 
 function mulberry32(seed: number): () => number {
@@ -33,6 +35,11 @@ function fmtTime(ms: number): string {
 
 const DEFAULT_COLUMNS = ['id', 'status', 'pay_amount', 'updated_at', 'remark'];
 
+/** 按表返回列结构；未知表回退到默认订单式列 */
+function columnsForTable(table: string): string[] {
+  return DEMO_TABLE_COLUMNS[table] ?? DEFAULT_COLUMNS;
+}
+
 export function demoParse(eventsJson: string): ParseResult {
   let parsed: { events: unknown[]; metadata: Record<string, unknown> };
   try {
@@ -42,39 +49,44 @@ export function demoParse(eventsJson: string): ParseResult {
   }
 
   const meta = (parsed.metadata?.demo ?? {}) as DemoMeta;
-  const db = typeof parsed.metadata?.database === 'string' ? parsed.metadata.database : 'shop';
-  const tables = (parsed.metadata?.tables ?? {}) as Record<string, unknown>;
-  const table = Object.keys(tables)[0] ?? 'orders';
-  const columns =
-    tables[table] && Array.isArray((tables[table] as { columns?: unknown[] }).columns)
-      ? ((tables[table] as { columns: unknown[] }).columns.map((c) => (c as { name?: string }).name ?? 'col'))
-      : DEFAULT_COLUMNS;
-
   const count = meta.count ?? 1284;
   const seed = meta.seed ?? 7;
+  const rand = mulberry32(seed);
   const types = meta.types ?? ['insert', 'update', 'delete'];
   const startMs = meta.startMs ?? Date.now() - 3600_000;
   const endMs = meta.endMs ?? Date.now();
-  const rand = mulberry32(seed);
   const span = Math.max(1, endMs - startMs);
+
+  const db = typeof parsed.metadata?.database === 'string' ? parsed.metadata.database : 'shop';
+  const realDemoTables = DEMO_TABLES[db] ?? ['orders', 'users'];
+  const targetTable = typeof meta.table === 'string' ? meta.table : '';
+  function pickTable(i: number): string {
+    if (targetTable && targetTable !== '全部') return targetTable;
+    // 全部：按索引散列到该库真实表，保证多表分布均匀
+    return realDemoTables[i % realDemoTables.length];
+  }
+  const columns = DEFAULT_COLUMNS;
 
   const changes: Change[] = [];
   let idCounter = 0;
   for (let i = 0; i < count; i += 1) {
+    const table = pickTable(i);
+    const columns = columnsForTable(table);
     const type = types[i % types.length];
     const ts = Math.floor(startMs + (i / Math.max(1, count - 1)) * span);
     idCounter += 1;
     const rowId = String(1000 + i);
     const status = type === 'update' ? '2' : '1';
     const amount = (19.9 + rand() * 800).toFixed(2);
-    const remark = `订单 #${rowId} 演示数据`;
+    const remark = `演示 #${rowId}`;
 
     const base: Record<string, string | null> = {};
     columns.forEach((c, idx) => {
       if (c === 'id') base[c] = rowId;
       else if (c === 'status') base[c] = status;
-      else if (c === 'pay_amount') base[c] = amount;
-      else if (c === 'updated_at') base[c] = fmtTime(ts);
+      else if (['pay_amount', 'amount', 'salary'].includes(c)) base[c] = amount;
+      else if (c === 'updated_at' || c === 'created_at' || c === 'paid_at' || c === 'hire_date') base[c] = fmtTime(ts);
+      else if (c === 'published' || c === 'refunded') base[c] = type === 'delete' ? '0' : '1';
       else if (c === 'remark') base[c] = remark;
       else base[c] = `v${idx}-${rowId}`;
     });
@@ -82,16 +94,28 @@ export function demoParse(eventsJson: string): ParseResult {
     const oldValues = type === 'insert' ? null : { ...base };
     const newValues = type === 'delete' ? null : { ...base };
     if (type === 'update' && oldValues && newValues) {
-      newValues.status = '2';
-      newValues.pay_amount = (parseFloat(amount) + 100).toFixed(2);
-      newValues.updated_at = fmtTime(ts + 30_000);
-      oldValues.status = '1';
+      if (columns.includes('status')) {
+        newValues.status = '2';
+        oldValues.status = '1';
+      }
+      if (columns.includes('pay_amount')) {
+        newValues.pay_amount = (parseFloat(amount) + 100).toFixed(2);
+      }
+      if (columns.includes('amount')) {
+        newValues.amount = (parseFloat(amount) + 100).toFixed(2);
+      }
+      if (columns.includes('salary')) {
+        newValues.salary = String(Math.round((parseFloat(amount) + 1000)));
+      }
+      if (columns.includes('updated_at')) {
+        newValues.updated_at = fmtTime(ts + 30_000);
+      }
     }
 
     changes.push({
       changeId: `c${i + 1}`,
       schema: db,
-      table,
+      table: table,
       type,
       columns: [...columns],
       primaryKeys: ['id'],

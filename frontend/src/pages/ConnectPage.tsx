@@ -25,7 +25,7 @@ const DEFAULT_FORM: ConnectionForm = {
   password: '',
   database: '',
   saveLocally: true,
-  useDemo: true,
+  useDemo: false,
 };
 
 function validate(form: ConnectionForm): Record<string, string> {

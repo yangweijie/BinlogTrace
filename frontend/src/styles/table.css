@@ -145,6 +145,22 @@
   color: var(--color-textSecondary);
   font-size: var(--fs-small);
 }
+.multi-select-group {
+  margin-top: var(--spacing-xs);
+  padding-top: var(--spacing-xs);
+  border-top: 1px dashed var(--color-divider);
+}
+.multi-select-group:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+.multi-select-group-label {
+  padding: var(--spacing-xs);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--color-textSecondary);
+}
 
 /* ---------- 数据表 ---------- */
 .data-table-wrap {

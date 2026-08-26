@@ -11,12 +11,37 @@ import { generateRollbackScript } from '../lib/parser-client';
 import { useRoute, navigate } from '../lib/route';
 import { toast } from '../lib/toast';
 import { splitSqlLines } from '../lib/sql-highlight';
-import { formatCount } from '../lib/format';
-import type { RollbackResult } from '../types/binlog';
+import { formatCount, formatLocalInput } from '../lib/format';
+import type { Change, RollbackResult } from '../types/binlog';
 
-function downloadSql(sql: string, db: string, table: string): void {
-  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const name = `rollback_${db}_${table || 'all'}_${stamp}.sql`;
+/** 把 'YYYY-MM-DDTHH:mm' / 'YYYY-MM-DD HH:mm' 压缩成 'YYYYMMDDHHmm' 用于文件名 */
+function compactTime(dt: string): string {
+  return formatLocalInput(dt).replace(/[^0-9]/g, '').slice(0, 12);
+}
+
+/**
+ * 生成带上下文的回滚文件名，格式：
+ *   rollback_{库}_{表或all}_{变更类型}_{时间范围起-止}_{生成时间}.sql
+ * 例如：rollback_blog_all_insert_20260826T0930-20260826T1030_20260826T1045.sql
+ */
+function buildRollbackFileName(opts: {
+  db: string;
+  tables: string[];
+  types: string;
+  start: string;
+  end: string;
+}): string {
+  const { db, tables, types, start, end } = opts;
+  const tablePart = tables.length === 0 ? 'all' : tables.length === 1 ? tables[0] : `tbl${tables.length}`;
+  const typePart = types && types !== 'all' ? types : 'all';
+  const range = `${compactTime(start) || 'na'}-${compactTime(end) || 'na'}`;
+  const now = new Date();
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  return `rollback_${db}_${tablePart}_${typePart}_${range}_${stamp}.sql`;
+}
+
+function downloadSql(sql: string, name: string): void {
   const blob = new Blob([sql], { type: 'text/sql;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -98,6 +123,16 @@ export default function RollbackPage() {
   const lineCount = rollback ? splitSqlLines(rollback.sql).length : 0;
   const db = route.params.get('db') ?? selected[0]?.schema ?? '';
   const table = route.params.get('table') ?? selected[0]?.table ?? '';
+  const typesParam = route.params.get('types') ?? 'all';
+  const startParam = route.params.get('start') ?? '';
+  const endParam = route.params.get('end') ?? '';
+
+  // 涉及到的表（去重，用于文件名）；全部=空，单表=表名，多表=数量标记
+  const involvedTables = useMemo(() => {
+    const set = new Set<string>();
+    selected.forEach((c) => set.add(c.table));
+    return [...set];
+  }, [selected]);
 
   const onCopy = async (): Promise<void> => {
     if (!rollback) return;
@@ -107,7 +142,14 @@ export default function RollbackPage() {
 
   const onDownload = (): void => {
     if (!rollback) return;
-    downloadSql(rollback.sql, db, table);
+    const name = buildRollbackFileName({
+      db,
+      tables: involvedTables,
+      types: typesParam,
+      start: startParam,
+      end: endParam,
+    });
+    downloadSql(rollback.sql, name);
   };
 
   return (

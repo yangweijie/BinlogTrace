@@ -76,3 +76,44 @@
 ### 关键文件改动
 - `agent/src/Router.php`、`agent/src/Server.php`、`agent/src/ClientConn.php`、`agent/bin/mysqlbinlog_dump.php`
 - `frontend/src/hooks/useSchemaMeta.ts`、`frontend/src/types/api.d.ts`、`frontend/src/lib/check-cfg.ts`、`frontend/src/pages/TracePage.tsx`
+
+## Session 2026-08-26（演示模式 bug 修复 + Playwright 端到端验证）
+
+### 已完成（全部前端，演示模式链路）
+- [x] `frontend/src/workers/demo-parse.ts`：修复 TDZ bug（`rand` 在声明前使用 → Worker 抛 ReferenceError → 拉取完不跳结果页）
+- [x] `frontend/src/pages/ResultPage.tsx`：按列筛选从 `c.columns`（表完整列）改为 `changedColumns(c)`（实际变更列），修「勾选列永远不生效」
+- [x] `frontend/src/hooks/useTraceRun.ts`：演示数据量从固定 1284 → 按小时比例（`DEMO_COUNT_PER_HOUR`，1h=100/6h=600/24h=2400），进度条同步改用 `demoCountRef`
+- [x] `frontend/src/lib/demo-data.ts`（新建）：抽出演示库/表静态元数据 `DEMO_DBS`/`DEMO_TABLES`，供 `useSchemaMeta` 与 `demo-parse` Worker 共享
+- [x] `frontend/src/workers/demo-parse.ts`：表名根据 `cfg.table` 生成（全部=多表散列；固定表=全用该表），不再写死 musics/orders；按库取真实表集合
+- [x] `frontend/src/lib/demo-data.ts`：新增 `DEMO_TABLE_COLUMNS`（每表差异化列：orders/payments/users/posts/comments/employees/departments），修「所有表都像订单表」
+- [x] `frontend/src/workers/demo-parse.ts`：值/变更生成按表列名适配（pay_amount/amount/salary/时间列/published/refunded 等）
+- [x] `frontend/src/components/MultiSelect.tsx` + `frontend/src/styles/table.css`：支持 `groups`（按表分组下拉）；筛选语义改为「同表内且、跨表或」
+- [x] `frontend/src/pages/ResultPage.tsx`：列筛选选项基于当前表筛选后的 `visibleChanges` 计算（选 comments 只显 comments 列），切换表时清空列筛选避免格式错配
+- [x] `frontend/src/pages/RollbackPage.tsx` + `frontend/src/pages/ResultPage.tsx`：回滚下载文件名改为带上下文 `rollback_{库}_{表或all/tblN}_{类型}_{时间范围}_{生成时间}.sql`（原 UUID）
+
+### 遇到的错误与解决方案（本轮）
+| 错误/现象 | 根因 | 解决方案 |
+|-----------|------|----------|
+| 演示拉取完不进结果页 | `demo-parse.ts` 中 `rand` 在 `const rand=` 前使用（TDZ ReferenceError） | 将 seed/rand 初始化提前 |
+| 列筛选勾选无效果 | 用 `c.columns`（表完整列集，演示数据都相同）判断 | 改用 `changedColumns(c)`（实际变化列） |
+| 时间范围不影响数据量 | 固定 `DEMO_COUNT=1284` | 按小时比例 `calcDemoCount` |
+| 变更列表出现 musics/users | `REAL_DEMO_TABLES` 写死，与表单下拉不一致 | 抽 `demo-data.ts` 共享，按 `cfg.table`/`db` 取 |
+| 各表列雷同像订单表 | 所有变更用同一 `DEFAULT_COLUMNS` | `DEMO_TABLE_COLUMNS` 差异化 + `columnsForTable` |
+| 多表列筛选项混在一起 | `columnOptions` 基于全部 `changes` | 改用 `visibleChanges`（当前表筛选后） |
+| 按列筛选多表「且」导致 0 匹配 | 跨表要求单条同时满足 | 改 `matchColumnFilter`：表内且、表间或 |
+| 下载文件名 UUID | 旧 dev server(8787/3080) 残留，未加载新代码 | 杀掉残留 server，统一 5173；重写 `buildRollbackFileName` |
+
+### Playwright 端到端验证（本轮新增）
+- 安装 `playwright` + chromium-headless-shell，编写 `pw-test.mjs` 走完整演示模式链路：
+  连接页勾选演示模式 → 填 user/password（演示模式也要求 user 必填，否则表单校验拦截）
+  → 连接并追踪 → 选 `blog` + 近1小时 → 开始追踪 → 进结果页 → 勾 2 条变更
+  → 生成回滚脚本 → 下载 .sql
+- **实际下载文件名**：`rollback_blog_tbl2_all_202608260655-202608260755_20260826075555.sql`
+  （库=blog / 表=tbl2 双表 / 类型=all / 时间范围 / 生成时刻），断言 `is UUID? false` 通过 → PASS
+- 结论：文件名修复在 5173 真实生效；UUID 现象是浏览器连到了残留旧 server 所致（已清理）
+- 测试脚本与临时下载目录已清理，未提交到仓库
+
+### 关键文件改动（本轮）
+- `frontend/src/workers/demo-parse.ts`、`frontend/src/hooks/useTraceRun.ts`、`frontend/src/lib/demo-data.ts`（新）
+- `frontend/src/components/MultiSelect.tsx`、`frontend/src/styles/table.css`
+- `frontend/src/pages/ResultPage.tsx`、`frontend/src/pages/RollbackPage.tsx`、`frontend/src/hooks/useSchemaMeta.ts`

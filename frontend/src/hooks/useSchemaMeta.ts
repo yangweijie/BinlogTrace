@@ -1,14 +1,8 @@
 // useSchemaMeta.ts — 库/表级联元数据（演示静态表 / INFORMATION_SCHEMA 查询）
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getSession } from '../lib/session';
+import { DEMO_DBS, DEMO_TABLES } from '../lib/demo-data';
 import type { QueryResultPayload } from '../types/api';
-
-const DEMO_DBS = ['shop', 'blog', 'hr'];
-const DEMO_TABLES: Record<string, string[]> = {
-  shop: ['orders', 'payments', 'users'],
-  blog: ['posts', 'comments'],
-  hr: ['employees', 'departments'],
-};
 
 export interface Option {
   value: string;
