@@ -1,0 +1,13 @@
+name: tp-aot-021-pdo-mysql-load
+version: 0.1.0
+mode: bin
+output: ../../../../build/artifacts/tp-aot-021-pdo-mysql-load
+build-dir: ../../../../build/typephp/tp-aot-021-pdo-mysql-load
+optimize: 0
+no-progress: true
+
+sources:
+  - main.php
+
+ext-deps:
+  - pdo_mysql
