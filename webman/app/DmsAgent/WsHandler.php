@@ -94,29 +94,64 @@ final class WsHandler
     }
 
     /** POST /dump — 启动 binlog 追踪，以 SSE 流持续推送变更。
-     *  返回 chunked 响应头（webman 官方 SSE 方式），后续帧通过 $connection->send(new Chunk(...)) 推送，
-     *  结束时发送空 Chunk 关闭流。无需手写裸协议（不再设置 protocol=null）。 */
+     *  绕过 webman HTTP 协议编码（其会加 Content-Length 阻断流式），
+     *  直接设置 protocol=null 后发送裸 HTTP 响应头 + 裸 data 帧（与 agent-workerman 一致）。 */
     public function onDump(TcpConnection $connection, array $frame): Response
     {
         $this->conn = $connection;
         $this->sseConn = $connection;
-        $this->sse = true;
         $payload = is_array($frame['payload'] ?? null) ? $frame['payload'] : [];
         $id = (string) ($frame['id'] ?? '');
 
-        // 先返回带 Transfer-Encoding: chunked 的响应头（webman 框架支持的标准 SSE 传输）；
-        // 真正的 data 帧在 drainDumpWorker/sendFrame 中通过 $connection 以 Chunk 异步写出。
-        // 若 handleBinlogDump 提前返回错误响应（未进入流），则直接返回该错误响应。
-        $early = $this->handleBinlogDump($id, $payload);
+        // 同步预校验：未连接 / 已在追踪 / binlogFile 缺失 → 直接以 JSON 错误帧返回（此时尚未进入 SSE 流）
+        $early = $this->validateDump($id, $payload);
         if ($early instanceof Response) {
             return $early;
         }
 
-        return (new Response(200, $this->withCors([
-            'Content-Type' => 'text/event-stream; charset=utf-8',
+        // 进入 SSE 流：返回带 text/event-stream 的 Response。
+        // 注意：不要加 Transfer-Encoding: chunked —— 否则 Workerman 会对响应做
+        // chunked 编码（结尾追加 0\r\n\r\n），后续裸 data 帧在流结束后到达，
+        // 浏览器报 ERR_INVALID_CHUNKED_ENCODING。
+        // Workerman 的 Response::__toString 对 text/event-stream 只输出
+        // headers + 空行（无 Content-Length、无 chunk 尾巴），HTTP/1.1 下
+        // App::send 走 $connection->send() 保持连接打开，后续裸 data 帧正常推送。
+        // CORS 头由 app\middleware\Cors 自动添加，此处不再重复（避免重复头）。
+        $this->sse = true;
+        // 关键：要等 webman 把 SSE 响应头 flush 出去之后，才能开始写 data 帧，
+        // 否则 data 会先于 HTTP 头被写进 socket，客户端收不到合法流。
+        // 用一次性 Timer 延到下一个事件循环 tick（响应头已写出）再启动 worker 并推首帧。
+        $self = $this;
+        Timer::add(0, function () use ($self, $id, $payload): void {
+            $self->handleBinlogDump($id, $payload);
+        }, null, false);
+        return new Response(200, [
+            // 标准 SSE 头。Transfer-Encoding: chunked 让 webman 的 App::send()
+            // 走 $connection->send($response)（保持连接打开），后续每帧用
+            // new Chunk("data: ...\n\n") 发送，浏览器按 chunked 流解析。
+            // 注意 Content-Type 必须用精确的 'text/event-stream' 才能命中
+            // Workerman Response::__toString 的 SSE 分支（只输出 headers+空行，不加 Content-Length）。
+            'Content-Type' => 'text/event-stream',
             'Cache-Control' => 'no-cache, no-transform',
             'X-Accel-Buffering' => 'no',
-        ]), ''));
+            'Transfer-Encoding' => 'chunked',
+        ], '');
+    }
+
+    /** 进入 SSE 流前的同步预校验；返回 Response 表示校验失败（直接以 JSON 错误帧回写） */
+    private function validateDump(string $id, array $payload): ?Response
+    {
+        if (!$this->connected || $this->mysqlHost === '') {
+            return $this->respondOnce($id, 'error', ['code' => AgentConstants::PROXY_NOT_READY, 'message' => '尚未连接 MySQL']);
+        }
+        if ($this->dumping) {
+            return $this->respondOnce($id, 'error', ['code' => AgentConstants::INVALID_PARAM, 'message' => '已在追踪中']);
+        }
+        $fileName = (string) ($payload['binlogFile'] ?? $this->binlogFile);
+        if ($fileName === '') {
+            return $this->respondOnce($id, 'error', ['code' => AgentConstants::INVALID_PARAM, 'message' => 'binlogFile 不能为空']);
+        }
+        return null;
     }
 
     /** POST /query — 执行只读查询，回传 query-result 或 error（Krowinski 同步，直接返回响应） */
@@ -225,21 +260,14 @@ final class WsHandler
     }
 
     /** @return Response|null 返回 Response 表示提前错误（控制器直接返回该响应，不进入 SSE 流）；
-     *          null 表示已启动流式（控制器返回 chunked 响应头，后续帧以 Chunk 推送） */
-    private function handleBinlogDump(string $id, array $payload): ?Response
+     *          流式已在 onDump 内通过一次性 Timer 异步启动（此时已处于 SSE 流，
+     *          错误以 SSE error 帧回写并关闭连接，不再返回 Response） */
+    private function handleBinlogDump(string $id, array $payload): void
     {
-        if (!$this->connected || $this->mysqlHost === '') {
-            return $this->respondOnce($id, 'error', ['code' => AgentConstants::PROXY_NOT_READY, 'message' => '尚未连接 MySQL']);
-        }
-        if ($this->dumping) {
-            return $this->respondOnce($id, 'error', ['code' => AgentConstants::INVALID_PARAM, 'message' => '已在追踪中']);
-        }
+        // 预校验已在 onDump 的 validateDump 完成；此处仅启动 worker。
+        // 若启动失败，以 SSE error 帧回写后关闭流。
         $fileName = (string) ($payload['binlogFile'] ?? $this->binlogFile);
         $filePos = (int) ($payload['binlogPos'] ?? 4);
-
-        if ($fileName === '') {
-            return $this->respondOnce($id, 'error', ['code' => AgentConstants::INVALID_PARAM, 'message' => 'binlogFile 不能为空']);
-        }
 
         // 时间窗口（前端传 epoch 毫秒，转秒给 worker；0 = 不限）
         $startTs = (int) ($payload['startMs'] ?? 0) > 0 ? intdiv((int) $payload['startMs'], 1000) : 0;
@@ -249,7 +277,9 @@ final class WsHandler
         $worker = __DIR__ . '/../../bin/krowinski_dump.php';
         if (!is_file($worker)) {
             $this->dumping = false;
-            return $this->respondOnce($id, 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => 'krowinski 解析脚本缺失: bin/krowinski_dump.php']);
+            $this->sendError($id, AgentConstants::INTERNAL_ERROR, 'krowinski 解析脚本缺失: bin/krowinski_dump.php');
+            $this->closeSse();
+            return;
         }
         // 密码走环境变量，避免出现在进程列表；env 必须基于 getenv() 全量合并——
         // Windows 下 proc_open 会整体替换子进程环境，缺 PATH/SYSTEMROOT 会导致
@@ -290,7 +320,9 @@ final class WsHandler
         );
         if (!is_resource($proc)) {
             $this->dumping = false;
-            return $this->respondOnce($id, 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => '无法启动 krowinski 解析进程']);
+            $this->sendError($id, AgentConstants::INTERNAL_ERROR, '无法启动 krowinski 解析进程');
+            $this->closeSse();
+            return;
         }
         $this->dumpProc = $proc;
         $this->dumpOutFile = $outFile;
@@ -305,7 +337,16 @@ final class WsHandler
             'binlogFile' => $fileName,
             'binlogPos' => $filePos,
         ]);
-        return null;
+    }
+
+    /** SSE 流异常时关闭连接（此时不能再返回 Response，只能主动 close） */
+    private function closeSse(): void
+    {
+        if ($this->sse && $this->conn !== null) {
+            $this->conn->send(new Chunk(''));
+            $this->conn->close();
+        }
+        $this->sseConn = null;
     }
 
     /** 轮询子进程 stdout 文件增量，逐行转发 binlog-change 帧；进程退出时清理 */
@@ -358,7 +399,7 @@ final class WsHandler
                 $errTail = '';
                 if ($this->dumpErrFile !== '' && is_file($this->dumpErrFile)) {
                     $errTail = trim((string) @file_get_contents($this->dumpErrFile));
-                    $errTail = substr($errTail, -200);
+                    $errTail = substr($errTail, -500);
                 }
                 $this->sendError('', AgentConstants::INTERNAL_ERROR, 'binlog 解析进程异常退出 code=' . $exitCode . ($errTail !== '' ? ': ' . $errTail : ''));
             }
@@ -393,8 +434,9 @@ final class WsHandler
         $this->dumpBuffer = '';
         $this->dumping = false;
         if ($this->sse && $this->conn !== null) {
-            // webman 官方 SSE：发送空 Chunk 表示流结束（Transfer-Encoding: chunked 终止）
+            // chunked 流结束：先发空 Chunk（0\r\n\r\n）标识流结束，再关闭连接
             $this->conn->send(new Chunk(''));
+            $this->conn->close();
         }
         $this->sseConn = null;
     }
@@ -571,8 +613,8 @@ final class WsHandler
 
     /**
      * 统一帧发送（SSE 模式）：
-     * 使用 webman 框架的 Chunk 推流，保持 text/event-stream 的 "data: {json}\n\n" 信封，
-     * 前端 ws.ts 按 SSE data 帧解析。非 SSE（connect/query）不走此方法，由 respondOnce 回单帧。
+     * 用 new Chunk("data: {json}\n\n") 包裹，走 HTTP chunked 编码，
+     * 浏览器按 chunked SSE 流解析。非 SSE（connect/query）不走此方法，由 respondOnce 回单帧。
      */
     private function sendFrame(string $id, string $type, array $payload): void
     {
@@ -588,15 +630,14 @@ final class WsHandler
             return;
         }
         if ($this->sse && $this->conn !== null) {
-            // webman 官方 SSE：以 Chunk 写出 data 帧，空 Chunk 表示流结束
             $this->conn->send(new Chunk("data: " . $json . "\n\n"));
         }
     }
 
-    /** 合并 CORS 响应头（开发期前端与 agent 跨域，统一开启） */
+    /** CORS 响应头由全局中间件 app\middleware\Cors 统一添加，此处不再重复（避免重复头） */
     private function withCors(array $headers): array
     {
-        return array_merge(['Access-Control-Allow-Origin' => '*'], $headers);
+        return $headers;
     }
 
     /** 普通请求（connect/query）的单帧 HTTP 响应；返回 Response 供控制器直接返回 */

@@ -19,10 +19,29 @@ use Workerman\Connection\TcpConnection;
  */
 class AgentController
 {
+    /** 解析请求体：优先用 $request->post()（webman 已解码 JSON body）；
+     *  回退到 rawBody + json_decode。 */
+    private function parseBody(Request $request): array
+    {
+        $post = $request->post();
+        if (is_array($post) && !empty($post)) {
+            return $post;
+        }
+        $body = $request->rawBody();
+        if (is_string($body) && $body !== '') {
+            $decoded = json_decode($body, true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+        return [];
+    }
+
     private function getHandler(Request $request): ?WsHandler
     {
         // 前端将 session 放在 body.payload.session（与 connect/query/close/startDump 一致）
-        $payload = is_array($request->post('payload')) ? $request->post('payload') : [];
+        $frame = $this->parseBody($request);
+        $payload = is_array($frame['payload'] ?? null) ? $frame['payload'] : [];
         $token = (string) ($payload['session'] ?? '');
         return $token === '' ? null : SessionManager::get($token);
     }
@@ -48,11 +67,8 @@ class AgentController
         // connect 为首个请求，payload 是 MySQL 连接参数（无 session），
         // 必须新建 handler 而非从 session 取（此时尚无 token）。
         $handler = new WsHandler();
-        $frame = [
-            'id' => (string) ($request->post('id') ?? ''),
-            'type' => 'connect',
-            'payload' => is_array($request->post('payload')) ? $request->post('payload') : [],
-        ];
+        $frame = $this->parseBody($request);
+        $frame['type'] = 'connect';
         return $handler->onConnect($request->connection, $frame);
     }
 
@@ -70,17 +86,14 @@ class AgentController
 
     public function startDump(Request $request): Response
     {
-        $payload = is_array($request->post('payload')) ? $request->post('payload') : [];
+        $frame = $this->parseBody($request);
+        $payload = is_array($frame['payload'] ?? null) ? $frame['payload'] : [];
         $token = (string) ($payload['session'] ?? '');
         $handler = $token === '' ? null : SessionManager::get($token);
         if ($handler === null) {
             return $this->errorResponse(1003, '会话不存在或已过期');
         }
-        $frame = [
-            'id' => (string) ($request->post('id') ?? ''),
-            'type' => 'binlog-dump',
-            'payload' => is_array($request->post('payload')) ? $request->post('payload') : [],
-        ];
+        $frame['type'] = 'binlog-dump';
         return $handler->onDump($request->connection, $frame);
     }
 
@@ -90,11 +103,8 @@ class AgentController
         if ($handler === null) {
             return null;
         }
-        $frame = [
-            'id' => (string) ($request->post('id') ?? ''),
-            'type' => 'frame',
-            'payload' => is_array($request->post('payload')) ? $request->post('payload') : [],
-        ];
+        $frame = $this->parseBody($request);
+        $frame['type'] = 'frame';
         return $action($handler, $request->connection, $frame);
     }
 }
