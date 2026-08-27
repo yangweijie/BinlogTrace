@@ -163,3 +163,74 @@
 ### 验证
 - 前端 `vitest run`：28 passed / 0 fail；`read_lints` 0 错误（本轮累计 28 测试全过，0 lint）。
 - 修改文件：`frontend/src/context/AppContext.tsx`、`frontend/src/hooks/useAgentPing.ts`、`frontend/src/pages/{ConnectPage,TracePage,RollbackPage,ResultPage}.tsx`、`frontend/src/components/MultiSelect.tsx`、`frontend/src/lib/{rollback-gen,parser-client}.ts`、`frontend/src/workers/parser.worker.ts`、`frontend/src/styles/{table,components}.css`、`frontend/src/types/api.d.ts`、`agent-workerman/bin/krowinski_dump.php`
+
+## Session 2026-08-27（webman 本机 127.0.0.1 端到端打通：connect→dump SSE）
+
+### 环境背景
+- 本机 MySQL 为 **9.4.0**（`caching_sha2_password` 插件，`mysql_native_password` 已被新版移除）。
+- 前端连接表单填：`host=127.0.0.1, port=3306, user=root, password=root, database=shengyibao`。
+- 实际可用库：`dms_test`、`jay_music` 等；`shengyibao` **不存在**。root 之前无 TCP 密码。
+
+### 问题链与逐项修复（全部在 `webman/` 目录）
+
+#### 1. connect 返回空元数据 + “未检测到 Binlog / 缺权限”误导提示
+- 根因 A：**数据库名 `shengyibao` 不存在** → 连接选库失败，但被当作“未检测到 Binlog”。
+- 根因 B：`KrowinskiQueryAdapter::connect()` 用 Doctrine `DriverManager::getConnection()`，
+  该调用是**懒连接**，不立即与 MySQL 握手；认证/选库错误延迟到首次查询才暴露，
+  而 `MetaGatherer` 的元数据查询报错被 error 回调吞掉 → `hasBinlog:false`、权限空、serverId 为假值。
+- 根因 C：MySQL 9.4 已移除 `SHOW MASTER STATUS`（8.4+ 起改为 `SHOW BINARY LOG STATUS`），
+  旧语句在 9.4 报语法错误 → 取不到 binlog 文件/位置。
+- 修复：
+  - `app/DmsAgent/Mysql/KrowinskiQueryAdapter.php`：`connect()` 在 `getConnection` 后执行
+    `fetchOne('SELECT 1')` 强制真实建连（**不可调 `connect()`——Doctrine Connection::connect() 是 protected**），
+    认证/选库错误立即抛出 → `handleConnect` 返回 `1001 MySQL 认证失败`。
+  - `app/DmsAgent/MetaGatherer.php`：master 步骤改 `SHOW BINARY LOG STATUS`（保留 `SHOW MASTER STATUS`
+    作老版本兜底）；新增 `SELECT @@server_id` 步骤，`applyResult` 对其转 int 写入 `meta['serverId']`
+    （之前 serverId 是代码生成的假值）。
+- 验证 connect 现返回真实数据：`serverVersion=9.4.0, binlogFile=binlog.000016, binlogPos=477,
+  binlogFormat=ROW, binlogRowImage=FULL, hasBinlog=true, serverId=1,
+  userPrivileges=[SELECT,REPLICATION SLAVE,REPLICATION CLIENT]`。
+
+#### 2. `POST /dump` → 404 Not Found
+- 根因：前端 `frontend/src/lib/ws.ts:102` 调 `POST /dump`，但 `config/route.php` 只注册了
+  `/binlog-dump`（WsHandler::startDump），无 `/dump` → 404。
+- 修复：`config/route.php` 新增 `Route::post('/dump', [AgentController::class, 'startDump'])` 别名
+  （保留旧 `/binlog-dump`）。
+
+#### 3. `POST /dump` → 1099 “krowinski 解析脚本缺失: bin/krowinski_dump.php”
+- 根因：`WsHandler.php` 中 `$worker = __DIR__ . '/../bin/krowinski_dump.php'`，
+  `__DIR__` 是 `app/DmsAgent`，`/../bin` 解析到 `app/bin`（**不存在**）；
+  脚本实际在 `webman/bin/krowinski_dump.php`（需 `/../../bin`）。`runtime` 目录与 `proc_open` 的
+  `cwd` 也用了 `dirname(__DIR__)`（`app/`）而非 `webman/` 根目录。
+- 修复：`$worker` → `__DIR__ . '/../../bin/krowinski_dump.php'`；`$runtime` →
+  `dirname(dirname(__DIR__)) . '/runtime'`；`proc_open` 的 `cwd` → `dirname(dirname(__DIR__))`。
+
+#### 4. `POST /dump`（浏览器）→ net::ERR_INVALID_HTTP
+- 根因：`WsHandler::onDump` 手动在响应头里写 `Transfer-Encoding: chunked`。在 webman/Workerman 中
+  chunked 编码由框架对 `Chunk` 对象自动处理，**手动加该头会导致重复/非法编码**，浏览器解析 HTTP
+  失败报 `ERR_INVALID_HTTP`。
+- 修复：移除手动 `Transfer-Encoding: chunked`，仅保留
+  `Content-Type: text/event-stream; charset=utf-8` + `Cache-Control: no-cache, no-transform` + `X-Accel-Buffering: no`。
+
+### 端到端验证（成功）
+- `runtime/krowinski_*.out` 实测持续输出 `heartbeat` 帧 + 真实 `change` 帧：
+  `update jay_music.test(id=3, create_time 变 2026-08-27 08:19:08)`、`insert ...`，
+  每帧带 `xid/timestamp/binlogFile=binlog.000016/binlogPos`。证明 connect→dump(SSE) 链路在 webman 本机跑通。
+
+### 环境侧操作（非代码，用户须知）
+- 通过 socket 登录把 root 的 **TCP 密码设为 `root`**（之前 root 无此 TCP 密码 → 1045）。
+  命令：`mysql -uroot -proot -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY 'root';"`
+  （MySQL 9.4 已无 mysql_native_password，root 保持 caching_sha2；PHP 8.5 pdo_mysql 原生支持它，无需 cleartext 插件）。
+- 前端 `database` 应填真实存在的库（如 `dms_test`），不要填 `shengyibao`。
+
+### 修改文件（本轮）
+- `webman/app/DmsAgent/Mysql/KrowinskiQueryAdapter.php`
+- `webman/app/DmsAgent/MetaGatherer.php`
+- `webman/app/DmsAgent/WsHandler.php`
+- `webman/config/route.php`
+
+### 待办 / 开放项
+- [ ] 浏览器真实 UI 验证 `/dump`（ERR_INVALID_HTTP 已修，但 `-i` 头部抓取因长任务被跳过，未最后肉眼确认响应头；
+      命令行 `runtime/*.out` 已证明流正常）→ 建议用户刷新前端重试一次 `/dump`。
+- [ ] `runtime/krowinski_*.err` 中 `emit #0 kind=? ts=0` 为探测阶段占位帧噪音，可清理（可选）。
+- [ ] 长期：前端 `database` 校验（连不存在库应给出明确错误，而非笼统 1001）。

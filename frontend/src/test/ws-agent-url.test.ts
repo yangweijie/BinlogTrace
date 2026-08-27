@@ -17,20 +17,6 @@ const okConnected: ConnectedPayload & { session?: string } = {
   session: 's1',
 };
 
-/** 捕获 connect 实际发出的请求 URL，并用 mock 响应满足 fetch */
-function captureConnectUrl(overrides: Partial<Response> = {}): { url: string; fetchMock: ReturnType<typeof vi.fn> } {
-  const fetchMock = vi.fn(async (url: string | URL | Request) => {
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ v: 2, id: 'x', type: 'connected', ts: Date.now(), payload: okConnected }),
-      ...overrides,
-    } as Response;
-  });
-  vi.stubGlobal('fetch', fetchMock);
-  return { url: String(url), fetchMock };
-}
-
 const connectOpts = {
   host: '127.0.0.1',
   port: 3306, // MySQL 端口，绝不应出现在代理地址中

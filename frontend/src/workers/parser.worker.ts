@@ -46,6 +46,7 @@ interface WorkerRequest {
     changesJson?: string;
     metaJson?: string;
     demo?: boolean;
+    independentTx?: boolean;
   };
 }
 

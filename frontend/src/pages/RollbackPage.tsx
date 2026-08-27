@@ -71,7 +71,7 @@ async function copySql(sql: string): Promise<void> {
 
 export default function RollbackPage() {
   const state = useAppState();
-  const { changes: ctxChanges, wsMeta, demoMode, agentUrl } = state;
+  const { changes: ctxChanges, demoMode, agentUrl } = state;
   const dispatch = useAppDispatch();
   useAgentPing();
   const route = useRoute();

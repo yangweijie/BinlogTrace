@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import { useAppState } from '../context/AppContext';
+import type { AppState } from '../context/AppContext';
 
 // 验证：页面挂载时自动 ping 一次代理，不可达时 dispatch setAgentReachable(false) → wsStatus=error
 const dispatchSpy = vi.fn();
@@ -21,7 +22,7 @@ import { pingAgent } from '../components/AgentConfig';
 describe('useAgentPing — 挂载自动 ping 并同步状态', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(useAppState).mockReturnValue({ agentUrl: 'http://127.0.0.1:8080' });
+    vi.mocked(useAppState).mockReturnValue({ agentUrl: 'http://127.0.0.1:8080' } as unknown as AppState);
   });
   afterEach(() => {
     vi.resetAllMocks();
@@ -56,7 +57,7 @@ describe('useAgentPing — 挂载自动 ping 并同步状态', () => {
     expect(pingAgent).toHaveBeenCalledTimes(1);
 
     // 改变 agentUrl 后重新渲染，应触发新的 ping
-    vi.mocked(useAppState).mockReturnValue({ agentUrl: 'http://other:9000' });
+    vi.mocked(useAppState).mockReturnValue({ agentUrl: 'http://other:9000' } as unknown as AppState);
     rerender();
     await new Promise((r) => setTimeout(r, 10));
     expect(pingAgent).toHaveBeenCalledWith('http://other:9000');

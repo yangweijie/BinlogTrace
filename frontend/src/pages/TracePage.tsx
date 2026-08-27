@@ -32,7 +32,7 @@ function formatElapsed(ms: number): string {
 export default function TracePage() {
   const dispatch = useAppDispatch();
   const state = useAppState();
-  const { connection, wsMeta, checkResult, demoMode, wsStatus, agentUrl } = state;
+  const { connection, wsMeta, checkResult, demoMode, agentUrl } = state;
   useAgentPing();
   const persisted = useRefLoad();
   const [db, setDb] = useState(persisted?.db ?? '');

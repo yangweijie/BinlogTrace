@@ -104,6 +104,10 @@
 | 同名连接反复保存堆积多条 | 1 | `doConnect` 每次 `newId()` → `upsertConnection` 永远 `unshift` → 先按 name 复用 id |
 | 24h 追踪 0 变更（从当前尾巴 pos 读） | 3 | `probeStartFile` 定位起点文件 pos4 + `--to-last-log` |
 | worker code=1 / 1099（mysql_native_password 插件缺失） | 1 | 改纯 PHP krowinski，不再 shell-out 本地 mysqlbinlog |
+| webman connect 返回空元数据 /“未检测到 Binlog/缺权限” | 3 | ① 数据库名 shengyibao 不存在 → 前端填真实库；② Doctrine getConnection 懒连接假成功 → connect() 加 `fetchOne('SELECT 1')` 强制真实建连（勿调 protected 的 connect()）；③ MySQL 9.4 移除 SHOW MASTER STATUS → 改用 SHOW BINARY LOG STATUS + 读 @@server_id |
+| webman `POST /dump` 404 | 1 | 路由仅注册 /binlog-dump，前端调 /dump → route.php 加 /dump 别名 |
+| webman `POST /dump` 1099 脚本缺失 | 1 | WsHandler 用 `__DIR__/../bin`(=app/bin 不存在)，应为 `/../../bin`；runtime/cwd 同步修正到 webman 根 |
+| webman `POST /dump` 浏览器 ERR_INVALID_HTTP | 2 | 响应头手动加 Transfer-Encoding: chunked 与 Workerman 自动编码冲突 → 移除，只留 text/event-stream + Cache-Control + X-Accel-Buffering |
 
 ## Verification
 - worker 独立探测（startTs=1787414500）：定位 binlog.000042，窗口内 2 条变更（NEWDECIMAL/DATETIME2 值正确）
@@ -117,3 +121,7 @@
 - [ ] 清理临时探针：`tests/_probe_dump_frames.php`、`tests/_probe_parser.php`、`tests/_probe_krowinski.php`、
       `tests/_probe_dump_flags.php`、`runtime/_e2e_*.php`、`runtime/_repro_f.php`、`runtime/kw_*.log`、`runtime/krowinski.pid`
 - [ ] （可选）probeOne 内加文件内二分，精确到文件内位置（历史很旧时提速）
+- [ ] 【2026-08-27 新增】webman `/dump` 的 ERR_INVALID_HTTP 已修（移除手动 Transfer-Encoding 头），
+      请刷新前端重试一次 `/dump` 做最终肉眼确认（命令行 `runtime/krowinski_*.out` 已证明 SSE 流正常）
+- [ ] 【2026-08-27 新增】前端 `database` 字段校验：连接不存在的库（如 shengyibao）应给明确错误而非笼统 1001
+- [ ] 【2026-08-27 新增】（可选）清理 `runtime/krowinski_*.err` 中 `emit #0 kind=? ts=0` 探测阶段占位帧噪音

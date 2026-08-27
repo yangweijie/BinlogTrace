@@ -92,7 +92,7 @@ function primaryKey(change: Change): string {
 
 export default function ResultPage() {
   const state = useAppState();
-  const { changes: ctxChanges, parseStatus, parseError, demoMode, wsMeta, agentUrl } = state;
+  const { changes: ctxChanges, parseStatus, parseError, demoMode, agentUrl } = state;
   const dispatch = useAppDispatch();
   useAgentPing();
   const route = useRoute();

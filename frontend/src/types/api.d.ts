@@ -16,8 +16,8 @@ export interface SavedConnection {
 /** 连接表单原始输入（密码仅勾选"保存到本地"才写入 SavedConnection） */
 export interface ConnectionForm {
   name: string;
-  /** 代理（binlog-agent）地址，默认 http://127.0.0.1:8080 */
-  agentUrl: string;
+  /** 代理（binlog-agent）地址，默认 http://127.0.0.1:8080；表单不持有，连接时取 state.agentUrl */
+  agentUrl?: string;
   host: string;
   port: string;
   user: string;

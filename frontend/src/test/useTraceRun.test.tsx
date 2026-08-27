@@ -12,7 +12,7 @@ const meta = { user: 'u', password: 'p', host: '127.0.0.1', port: 8080 } as unkn
 
 const cfg: TraceConfig = {
   db: 'shop',
-  table: '全部',
+  table: ['全部'],
   types: ['insert', 'update', 'delete'],
   start: '2024-01-01 00:00:00',
   end: '2024-01-01 01:00:00',

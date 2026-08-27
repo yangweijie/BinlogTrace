@@ -41,7 +41,7 @@ function validate(form: ConnectionForm): Record<string, string> {
 export default function ConnectPage() {
   const dispatch = useAppDispatch();
   const state = useAppState();
-  const { wsStatus, wsError, checkResult, agentUrl } = state;
+  const { wsError, checkResult, agentUrl } = state;
   useAgentPing();
   const [form, setForm] = useState<ConnectionForm>(DEFAULT_FORM);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -60,11 +60,10 @@ export default function ConnectPage() {
   /** 已保存连接的一键连接可传入 override 绕过表单 state 竞态（setForm 尚未 flush 时 doConnect 就读了旧值） */
   const doConnect = async (
     opts: { save: boolean; thenNavigate: boolean },
-    override?: Pick<ConnectionForm, 'agentUrl' | 'host' | 'port' | 'user' | 'password' | 'database' | 'useDemo'>,
+    override?: Pick<ConnectionForm, 'host' | 'port' | 'user' | 'password' | 'database' | 'useDemo'>,
   ): Promise<void> => {
     // 合并覆盖值（一键连接时用保存的数据；表单提交时用当前 state）
     const effective = {
-      agentUrl: override?.agentUrl ?? form.agentUrl,
       host: override?.host ?? form.host,
       port: override?.port ?? form.port,
       user: override?.user ?? form.user,
