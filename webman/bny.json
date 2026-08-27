@@ -1,0 +1,25 @@
+{
+    "title": "TypePHP DMS Agent (webman)",
+    "name": "typephp-dms-webman",
+    "main": "./start.php",
+    "icon": "../../bny-windows-x86_64/icon.png",
+    "define": [
+        "memory_limit=256M",
+        "max_execution_time=0"
+    ],
+    "ignore": [
+        "runtime/",
+        ".git/",
+        "tests/",
+        "frontend/",
+        "agent/",
+        "agent-workerman/",
+        "parser/",
+        "docs/",
+        "outputs/",
+        "dist/",
+        "*.pptx",
+        "*.png",
+        "*.svg"
+    ]
+}

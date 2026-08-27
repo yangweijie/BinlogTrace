@@ -13,6 +13,7 @@
  */
 
 return [
+    'listen' => 'http://0.0.0.0:8787',
     'event_loop' => '',
     'stop_timeout' => 2,
     'pid_file' => runtime_path() . '/webman.pid',
