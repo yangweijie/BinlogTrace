@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#eef4ff"/>
+      <stop offset="1" stop-color="#dbe7ff"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="8" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#1b4fb0"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="720" fill="url(#bg3)"/>
+  <text x="640" y="78" font-size="38" font-weight="900" fill="#1b4fb0" text-anchor="middle">一图看懂：浏览器如何追踪 MySQL</text>
+  <text x="640" y="118" font-size="22" fill="#444" text-anchor="middle">真实模式 · 前端驱动 + Agent 解析 binlog（无需 TypePHP 编译器）</text>
+
+  <!-- Browser -->
+  <g transform="translate(90,230)">
+    <rect x="0" y="0" width="300" height="280" rx="20" fill="#ffffff" stroke="#2D6CDF" stroke-width="5"/>
+    <rect x="0" y="0" width="300" height="44" rx="20" fill="#2D6CDF"/>
+    <rect x="0" y="22" width="300" height="22" fill="#2D6CDF"/>
+    <circle cx="24" cy="22" r="7" fill="#fff"/><circle cx="48" cy="22" r="7" fill="#fff"/><circle cx="72" cy="22" r="7" fill="#fff"/>
+    <text x="150" y="96" font-size="26" font-weight="800" fill="#1b4fb0" text-anchor="middle">浏览器前端</text>
+    <text x="150" y="134" font-size="18" fill="#444" text-anchor="middle">连接 / 追踪 / 结果 / 回滚</text>
+    <text x="150" y="166" font-size="18" fill="#444" text-anchor="middle">HTTP REST + SSE</text>
+    <rect x="40" y="200" width="220" height="50" rx="12" fill="#eaf1ff"/>
+    <text x="150" y="232" font-size="18" font-weight="700" fill="#2D6CDF" text-anchor="middle">接收 binlog-change 帧</text>
+  </g>
+
+  <!-- Agent -->
+  <g transform="translate(535,230)">
+    <rect x="0" y="0" width="300" height="280" rx="20" fill="#ffffff" stroke="#FF8A3D" stroke-width="5"/>
+    <rect x="0" y="0" width="300" height="44" rx="20" fill="#FF8A3D"/>
+    <rect x="0" y="22" width="300" height="22" fill="#FF8A3D"/>
+    <text x="150" y="96" font-size="26" font-weight="800" fill="#d96b1f" text-anchor="middle">Agent</text>
+    <text x="150" y="132" font-size="18" fill="#444" text-anchor="middle">agent-workerman / webman</text>
+    <text x="150" y="162" font-size="18" fill="#444" text-anchor="middle">纯 PHP · 监听 :8080</text>
+    <rect x="30" y="196" width="240" height="60" rx="12" fill="#fff2e6"/>
+    <text x="150" y="222" font-size="17" font-weight="700" fill="#d96b1f" text-anchor="middle">派生 krowinski 子进程</text>
+    <text x="150" y="244" font-size="15" fill="#888" text-anchor="middle">逐行解析 binlog 行事件</text>
+  </g>
+
+  <!-- MySQL -->
+  <g transform="translate(980,250)">
+    <ellipse cx="80" cy="0" rx="60" ry="20" fill="#2D6CDF"/>
+    <rect x="20" y="0" width="120" height="160" fill="#2D6CDF"/>
+    <ellipse cx="80" cy="160" rx="60" ry="20" fill="#1b4fb0"/>
+    <line x1="20" y1="54" x2="140" y2="54" stroke="#cfe0ff" stroke-width="3"/>
+    <line x1="20" y1="108" x2="140" y2="108" stroke="#cfe0ff" stroke-width="3"/>
+    <text x="80" y="200" font-size="24" font-weight="800" fill="#1b4fb0" text-anchor="middle">MySQL</text>
+    <text x="80" y="230" font-size="16" fill="#444" text-anchor="middle">binlog_format=ROW</text>
+  </g>
+
+  <!-- arrows -->
+  <line x1="390" y1="370" x2="530" y2="370" stroke="#1b4fb0" stroke-width="5" marker-end="url(#arrow)"/>
+  <text x="460" y="358" font-size="16" fill="#1b4fb0" text-anchor="middle">POST /dump</text>
+  <line x1="835" y1="370" x2="975" y2="370" stroke="#1b4fb0" stroke-width="5" marker-end="url(#arrow)"/>
+  <text x="905" y="358" font-size="16" fill="#1b4fb0" text-anchor="middle">COM_BINLOG_DUMP</text>
+  <line x1="975" y1="330" x2="840" y2="410" stroke="#FF8A3D" stroke-width="4" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+  <text x="930" y="430" font-size="15" fill="#d96b1f" text-anchor="middle">SSE 推送变更</text>
+
+  <text x="640" y="650" font-size="20" font-weight="700" fill="#1b4fb0" text-anchor="middle">无需编译器 · 全程前端驱动 · 变更清单直接可读</text>
+</svg>

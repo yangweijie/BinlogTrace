@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>BinlogTrace 功能使用讲解</title>
+<style>
+  body { margin: 0; padding: 0; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+  .slide-page {
+    position: relative;
+    width: 1440px;
+    height: 810px;
+    overflow: hidden;
+    box-sizing: border-box;
+    background: #ffffff;
+  }
+  /* 通用漫画风元素 */
+  .panel { background: #eef4ff; border: 4px solid #2D6CDF; border-radius: 18px; }
+  .panel-orange { background: #fff3ea; border: 4px solid #FF8A3D; border-radius: 18px; }
+  .bubble { background: #ffffff; border: 4px solid #2D6CDF; border-radius: 20px; position: relative; }
+  .bubble-orange { background: #ffffff; border: 4px solid #FF8A3D; border-radius: 20px; position: relative; }
+  .title { font-size: 44px; font-weight: 800; color: #1b4fb0; }
+  .sub { font-size: 22px; color: #444; }
+  .h2 { font-size: 34px; font-weight: 800; color: #1b4fb0; }
+  .p { font-size: 22px; color: #333; }
+  .chip { display: inline-block; background: #2D6CDF; color: #fff; border-radius: 12px; padding: 4px 16px; font-size: 20px; font-weight: 700; }
+  .chip-o { display: inline-block; background: #FF8A3D; color: #fff; border-radius: 12px; padding: 4px 16px; font-size: 20px; font-weight: 700; }
+  .stepnum { position: absolute; top: -28px; left: -14px; width: 64px; height: 64px; background: #FF8A3D; color:#fff; border-radius: 50%; font-size: 34px; font-weight: 800; text-align:center; line-height: 64px; border: 4px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,.2);}
+  .foot { position: absolute; bottom: 26px; left: 60px; font-size: 16px; color: #999; }
+  .tag { position: absolute; top: 40px; right: 60px; font-size: 18px; color: #2D6CDF; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<!-- ============ 1. 封面 ============ -->
+<div class="slide-page" style="background:#eef4ff;">
+  <img src="file://D:/git/php/typephp_dms/outputs/slides/slide01-cover.png" style="position:absolute; left:0; top:0; width:1440px; height:810px; object-fit:cover;">
+  <div class="tag">功能使用讲解 · Manga Guide</div>
+</div>
+
+<!-- ============ 2. 问题场景 ============ -->
+<div class="slide-page" style="background:#fff3ea; padding:60px;">
+  <div class="title" style="margin-bottom:6px;">它解决什么问题？</div>
+  <div class="sub">线上数据被误删 / 误改后，如何快速定位并安全回滚</div>
+  <div style="display:flex; gap:40px; margin-top:34px; align-items:flex-start;">
+    <div class="panel" style="flex:1; padding:34px 30px; height:430px; box-sizing:border-box;">
+      <div class="h2" style="color:#d96b1f; margin-bottom:18px;">😱 传统做法的痛点</div>
+      <ul style="font-size:24px; line-height:2.2; color:#333; margin:0; padding-left:28px;">
+        <li>找不到是谁、何时改了数据</li>
+        <li>手写回滚 SQL 又慢又容易出错</li>
+        <li>binlog 是二进制字节流，肉眼读不动</li>
+        <li>只能停机恢复，影响业务</li>
+      </ul>
+    </div>
+    <div class="panel-orange" style="flex:1; padding:34px 30px; height:430px; box-sizing:border-box;">
+      <div class="h2" style="margin-bottom:18px;">💡 BinlogTrace 怎么做</div>
+      <ul style="font-size:24px; line-height:2.2; color:#333; margin:0; padding-left:28px;">
+        <li>把 binlog 变成<strong> 可读的变更清单</strong></li>
+        <li>按 schema / 表 / 操作类型筛选</li>
+        <li>一键生成 INSERT↔DELETE / UPDATE 回滚</li>
+        <li>全程浏览器驱动，无需停机</li>
+      </ul>
+    </div>
+  </div>
+  <div class="foot">BinlogTrace · MySQL 数据追踪工具</div>
+</div>
+
+<!-- ============ 3. 三步上手流程图 ============ -->
+<div class="slide-page" style="background:#ffffff; padding:60px;">
+  <div class="title">三步上手：连接 → 追踪 → 回滚</div>
+  <div class="sub" style="margin-top:6px;">全程浏览器驱动，Agent 在后台解析 binlog</div>
+  <div style="display:flex; gap:30px; margin-top:50px; align-items:center; justify-content:center;">
+    <div class="panel" style="width:360px; height:360px; padding:30px; box-sizing:border-box; text-align:center;">
+      <div class="chip" style="margin-bottom:18px;">STEP 1</div>
+      <div style="font-size:30px; font-weight:800; color:#1b4fb0;">连接 MySQL</div>
+      <div class="p" style="margin-top:18px;">填写连接信息，自动校验 binlog 配置是否满足追踪条件</div>
+    </div>
+    <div style="font-size:60px; color:#FF8A3D; font-weight:800;">→</div>
+    <div class="panel-orange" style="width:360px; height:360px; padding:30px; box-sizing:border-box; text-align:center;">
+      <div class="chip-o" style="margin-bottom:18px;">STEP 2</div>
+      <div style="font-size:30px; font-weight:800; color:#d96b1f;">实时追踪</div>
+      <div class="p" style="margin-top:18px;">发起 binlog dump，SSE 实时推送行级变更</div>
+    </div>
+    <div style="font-size:60px; color:#FF8A3D; font-weight:800;">→</div>
+    <div class="panel" style="width:360px; height:360px; padding:30px; box-sizing:border-box; text-align:center;">
+      <div class="chip" style="margin-bottom:18px;">STEP 3</div>
+      <div style="font-size:30px; font-weight:800; color:#1b4fb0;">生成回滚</div>
+      <div class="p" style="margin-top:18px;">选中变更，按 xid 分组生成回滚 SQL</div>
+    </div>
+  </div>
+  <div class="foot">真实模式：前端 HTTP+SSE ↔ Agent（纯 PHP）↔ MySQL</div>
+</div>
+
+<!-- ============ 4. 第一步 连接 ============ -->
+<div class="slide-page" style="background:#ffffff; padding:50px 60px;">
+  <div class="stepnum">1</div>
+  <div class="title" style="margin-left:50px;">连接 MySQL：填好信息，一键检查</div>
+  <div style="display:flex; gap:36px; margin-top:34px; align-items:flex-start;">
+    <div style="flex:1.1;">
+      <img src="file://D:/git/php/typephp_dms/outputs/slides/01-connect-page.png" style="width:100%; border:4px solid #2D6CDF; border-radius:14px;">
+    </div>
+    <div style="flex:1;">
+      <div class="h2" style="margin-bottom:14px;">关键操作</div>
+      <ul style="font-size:23px; line-height:2; color:#333; padding-left:26px; margin:0;">
+        <li>填写<strong> 主机 / 端口 / 账号 / 密码 / 数据库</strong></li>
+        <li>设置 <span class="chip">Agent 地址</span> 默认 <code>http://127.0.0.1:8080</code></li>
+        <li>真实模式由 Agent 采集 binlog 元数据</li>
+        <li>演示模式调用 <code>checkBinlogCfg</code> 校验配置</li>
+      </ul>
+      <div class="bubble-orange" style="margin-top:24px; padding:18px 22px;">
+        <div class="p" style="margin:0; color:#d96b1f; font-weight:700;">✔ 连接成功后会返回 binlog 文件名、位置、GTID 等元数据</div>
+      </div>
+    </div>
+  </div>
+  <div class="foot">页面路径：/ 连接页</div>
+</div>
+
+<!-- ============ 5. 第二步 配置追踪 ============ -->
+<div class="slide-page" style="background:#ffffff; padding:50px 60px;">
+  <div class="stepnum">2</div>
+  <div class="title" style="margin-left:50px;">配置追踪：选择范围，发起 dump</div>
+  <div style="display:flex; gap:36px; margin-top:34px; align-items:flex-start;">
+    <div style="flex:1.1;">
+      <img src="file://D:/git/php/typephp_dms/outputs/slides/02-trace-config.png" style="width:100%; border:4px solid #FF8A3D; border-radius:14px;">
+    </div>
+    <div style="flex:1;">
+      <div class="h2" style="margin-bottom:14px;">追踪参数</div>
+      <ul style="font-size:23px; line-height:2; color:#333; padding-left:26px; margin:0;">
+        <li>可选库表与操作类型过滤</li>
+        <li>支持<strong> 历史点定位</strong>：携带 <code>startMs</code> / <code>endMs</code> 时间窗口</li>
+        <li><code>POST /dump</code> 发起 binlog dump</li>
+        <li>Agent 派生 krowinski 子进程逐行解析</li>
+      </ul>
+      <div class="bubble" style="margin-top:24px; padding:18px 22px;">
+        <div class="p" style="margin:0; color:#1b4fb0; font-weight:700;">⏱ 时间窗口内外的变更会被自动过滤，只留下你关心的数据</div>
+      </div>
+    </div>
+  </div>
+  <div class="foot">页面路径：/trace 追踪页</div>
+</div>
+
+<!-- ============ 6. 第三步 查看结果 ============ -->
+<div class="slide-page" style="background:#ffffff; padding:50px 60px;">
+  <div class="stepnum">3</div>
+  <div class="title" style="margin-left:50px;">查看结果：变更清单一目了然</div>
+  <div style="display:flex; gap:36px; margin-top:34px; align-items:flex-start;">
+    <div style="flex:1.1;">
+      <img src="file://D:/git/php/typephp_dms/outputs/slides/03-result-page.png" style="width:100%; border:4px solid #2D6CDF; border-radius:14px;">
+    </div>
+    <div style="flex:1;">
+      <div class="h2" style="margin-bottom:14px;">结果页能力</div>
+      <ul style="font-size:23px; line-height:2; color:#333; padding-left:26px; margin:0;">
+        <li>所有解码变更以<strong> 列表</strong> 展示</li>
+        <li>支持按 schema / 表 / 操作类型筛选</li>
+        <li>实时流式追加，边追踪边看</li>
+        <li>点击单条查看前后值 diff</li>
+      </ul>
+      <div class="bubble-orange" style="margin-top:24px; padding:18px 22px;">
+        <div class="p" style="margin:0; color:#d96b1f; font-weight:700;">每条记录含 kind / schema / table / xid / 时间戳与 binlog 位点</div>
+      </div>
+    </div>
+  </div>
+  <div class="foot">页面路径：/trace/result 结果页</div>
+</div>
+
+<!-- ============ 7. 变更详情 diff ============ -->
+<div class="slide-page" style="background:#ffffff; padding:50px 60px;">
+  <div class="title">读懂一次变更：前后值 diff</div>
+  <div class="sub" style="margin-top:6px;">字段级对比，让你看清数据到底改了什么</div>
+  <div style="display:flex; gap:36px; margin-top:30px; align-items:flex-start;">
+    <div style="flex:1.1;">
+      <img src="file://D:/git/php/typephp_dms/outputs/slides/04-change-detail.png" style="width:100%; border:4px solid #FF8A3D; border-radius:14px;">
+    </div>
+    <div style="flex:1;">
+      <div class="panel" style="padding:30px;">
+        <div class="h2" style="margin-bottom:14px;">DIFF 视图</div>
+        <ul style="font-size:23px; line-height:2; color:#333; padding-left:26px; margin:0;">
+          <li><span style="color:#d96b1f;font-weight:800;">before</span> → <span style="color:#2D6CDF;font-weight:800;">after</span> 逐字段对照</li>
+          <li>变化字段高亮提示</li>
+          <li>主键 / 唯一键明确标注</li>
+          <li>支持 BLOB（base64）与 BIGINT 原始值</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="foot">点击结果页任意一条 → 变更详情</div>
+</div>
+
+<!-- ============ 8. 单行回滚 ============ -->
+<div class="slide-page" style="background:#ffffff; padding:50px 60px;">
+  <div class="title">单行回滚：一条变更，反转为 SQL</div>
+  <div style="display:flex; gap:36px; margin-top:30px; align-items:flex-start;">
+    <div style="flex:1.1;">
+      <img src="file://D:/git/php/typephp_dms/outputs/slides/05-row-rollback.png" style="width:100%; border:4px solid #2D6CDF; border-radius:14px;">
+    </div>
+    <div style="flex:1;">
+      <div class="panel-orange" style="padding:30px;">
+        <div class="h2" style="color:#d96b1f; margin-bottom:14px;">回滚规则</div>
+        <ul style="font-size:24px; line-height:2; color:#333; padding-left:26px; margin:0;">
+          <li><strong>INSERT</strong> → 生成 <strong>DELETE</strong></li>
+          <li><strong>DELETE</strong> → 生成 <strong>INSERT</strong></li>
+          <li><strong>UPDATE</strong> → 交换 before/after 的 UPDATE</li>
+        </ul>
+      </div>
+      <div class="bubble" style="margin-top:22px; padding:18px 22px;">
+        <div class="p" style="margin:0; color:#1b4fb0; font-weight:700;">一键复制 / 执行，单条误操作也能精准补救</div>
+      </div>
+    </div>
+  </div>
+  <div class="foot">页面路径：/rollback 回滚页</div>
+</div>
+
+<!-- ============ 9. 多选批量回滚 ============ -->
+<div class="slide-page" style="background:#ffffff; padding:46px 60px;">
+  <div class="title">多选批量回滚：一次搞定整笔事务</div>
+  <div style="display:flex; gap:28px; margin-top:26px; align-items:flex-start;">
+    <div style="flex:1;">
+      <img src="file://D:/git/php/typephp_dms/outputs/slides/06-multi-select.png" style="width:100%; border:4px solid #2D6CDF; border-radius:14px;">
+      <div class="sub" style="margin-top:10px; text-align:center;">① 勾选多条变更</div>
+    </div>
+    <div style="flex:1;">
+      <img src="file://D:/git/php/typephp_dms/outputs/slides/07-multi-rollback.png" style="width:100%; border:4px solid #FF8A3D; border-radius:14px;">
+      <div class="sub" style="margin-top:10px; text-align:center;">② 批量生成回滚 SQL</div>
+    </div>
+    <div style="flex:1.1;">
+      <div class="panel" style="padding:28px; height:330px; box-sizing:border-box;">
+        <div class="h2" style="margin-bottom:14px;">分组与排序</div>
+        <ul style="font-size:22px; line-height:2; color:#333; padding-left:24px; margin:0;">
+          <li>按 <strong>xid</strong> 事务分组</li>
+          <li>按 <strong>timestamp</strong> 排序</li>
+          <li>保持事务内操作顺序</li>
+          <li>适合整笔误操作的恢复</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="foot">页面路径：/rollback 回滚页（多选模式）</div>
+</div>
+
+<!-- ============ 10. 独立回滚 ============ -->
+<div class="slide-page" style="background:#ffffff; padding:50px 60px;">
+  <div class="title">灵活独立回滚：任意勾选，不止于整笔</div>
+  <div style="display:flex; gap:36px; margin-top:30px; align-items:flex-start;">
+    <div style="flex:1.1;">
+      <img src="file://D:/git/php/typephp_dms/outputs/slides/08-independent-rollback.png" style="width:100%; border:4px solid #FF8A3D; border-radius:14px;">
+    </div>
+    <div style="flex:1;">
+      <div class="panel" style="padding:30px;">
+        <div class="h2" style="margin-bottom:14px;">为什么需要独立回滚</div>
+        <ul style="font-size:23px; line-height:2; color:#333; padding-left:26px; margin:0;">
+          <li>跨事务挑选若干条变更</li>
+          <li>无需回滚整笔，只还原需要的部分</li>
+          <li>每条独立生成对应回滚 SQL</li>
+          <li>精细控制，避免误伤正常数据</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="foot">页面路径：/rollback 回滚页</div>
+</div>
+
+<!-- ============ 11. 架构一图懂 ============ -->
+<div class="slide-page" style="background:#eef4ff;">
+  <img src="file://D:/git/php/typephp_dms/outputs/slides/slide11-arch.png" style="position:absolute; left:0; top:0; width:1440px; height:810px; object-fit:cover;">
+</div>
+
+<!-- ============ 12. 总结收尾 ============ -->
+<div class="slide-page" style="background:#eef4ff;">
+  <img src="file://D:/git/php/typephp_dms/outputs/slides/slide12-end.png" style="position:absolute; left:0; top:0; width:1440px; height:810px; object-fit:cover;">
+  <div class="foot" style="position:absolute; bottom:24px; left:50%; transform:translateX(-50%); color:#555;">BinlogTrace · 连接 → 追踪 → 看变更 → 一键回滚</div>
+</div>
+
+</body>
+</html>
