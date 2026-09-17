@@ -272,6 +272,12 @@ final class WsHandler
         // 时间窗口（前端传 epoch 毫秒，转秒给 worker；0 = 不限）
         $startTs = (int) ($payload['startMs'] ?? 0) > 0 ? intdiv((int) $payload['startMs'], 1000) : 0;
         $endTs = (int) ($payload['endMs'] ?? 0) > 0 ? intdiv((int) $payload['endMs'], 1000) : 0;
+        // 历史追溯语义：结束时间不等待未来时刻。若前端选了未来 endTs（如手工误选/表单
+        // 恢复旧值），worker 会一直 tail 到该时刻才退出（心跳兜底 time()>endTs+2 迟迟
+        // 不成立），表现为进度条转圈不停；收敛为当前时间后，历史追平即快速退出。
+        if ($endTs > 0) {
+            $endTs = min($endTs, time());
+        }
 
         $this->dumping = true;
         $worker = __DIR__ . '/../../bin/krowinski_dump.php';
@@ -284,6 +290,13 @@ final class WsHandler
         // 密码走环境变量，避免出现在进程列表；env 必须基于 getenv() 全量合并——
         // Windows 下 proc_open 会整体替换子进程环境，缺 PATH/SYSTEMROOT 会导致
         // Winsock 初始化失败（socket_create 10106），krowinski 无法建连
+        if (!function_exists('socket_create') || !function_exists('socket_shutdown')) {
+            $this->dumping = false;
+            $this->sendError($id, AgentConstants::INTERNAL_ERROR,
+                '当前 PHP 缺少 ext-sockets 扩展，无法解析 binlog（php -m 检查，php.ini 中启用 extension=sockets 后重启）');
+            $this->closeSse();
+            return;
+        }
         $env = array_merge(getenv(), [
             'DMS_MYSQL_PASSWORD' => $this->mysqlPassword,
         ]);

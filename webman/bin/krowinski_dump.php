@@ -58,6 +58,15 @@ if ($file === '') {
 
 require __DIR__ . '/../vendor/autoload.php';
 
+// krowinski 的 Socket 依赖 ext-sockets；缺失时其 Socket::__destruct 会再抛
+// "undefined function socket_shutdown()" 致命错误，产生难以定位的 255 退出，故先显式拦截。
+// 同时检查 socket_shutdown（实际崩掉的符号），避免「部分可用」时仍 255。
+if (!function_exists('socket_create') || !function_exists('socket_shutdown')) {
+    fwrite(STDERR, "krowinski_dump: 当前 PHP 缺少 ext-sockets 扩展，无法解析 binlog。"
+        . "请改用带 sockets 扩展的 php 运行（php -m 检查，php.ini 中启用 extension=sockets）\n");
+    exit(2);
+}
+
 use MySQLReplication\Config\ConfigBuilder;
 use MySQLReplication\Definitions\ConstEventType;
 use MySQLReplication\Event\DTO\DeleteRowsDTO;

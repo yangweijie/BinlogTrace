@@ -3,3 +3,8 @@ agent-workerman/runtime
 agent-workerman/workerman.log
 agent-workerman/workerman.start.php.pid
 agent/vendor
+
+
+#Ignore vscode AI rules
+.github\instructions\codacy.instructions.md
+agent-workerman/php_errors.log
