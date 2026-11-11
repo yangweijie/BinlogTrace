@@ -169,6 +169,11 @@ function probeOne(string $host, int $port, string $user, string $password, strin
             ->withBinLogPosition('4')
             ->withHeartbeatPeriod(2) // 空文件时快速解除阻塞读
             ->withEventsOnly([
+                // V1 行事件必须订阅：log_bin_use_v1_row_events=ON 的实例（如阿里云 RDS）
+                // 发 23/24/25，只订 V2 会被 ignoreEvent 静默丢弃 → 永远 0 变更
+                ConstEventType::WRITE_ROWS_EVENT_V1->value,
+                ConstEventType::UPDATE_ROWS_EVENT_V1->value,
+                ConstEventType::DELETE_ROWS_EVENT_V1->value,
                 ConstEventType::WRITE_ROWS_EVENT_V2->value,
                 ConstEventType::UPDATE_ROWS_EVENT_V2->value,
                 ConstEventType::DELETE_ROWS_EVENT_V2->value,
@@ -212,6 +217,9 @@ $binLogStream = new MySQLReplicationFactory(
         // 原 5s 导致即使无数据也需等 ~5s 才能结束 dump，用户体验为"至少卡 5 秒"。
         ->withHeartbeatPeriod(2)
         ->withEventsOnly([
+            ConstEventType::WRITE_ROWS_EVENT_V1->value,
+            ConstEventType::UPDATE_ROWS_EVENT_V1->value,
+            ConstEventType::DELETE_ROWS_EVENT_V1->value,
             ConstEventType::WRITE_ROWS_EVENT_V2->value,
             ConstEventType::UPDATE_ROWS_EVENT_V2->value,
             ConstEventType::DELETE_ROWS_EVENT_V2->value,
