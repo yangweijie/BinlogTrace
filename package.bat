@@ -28,11 +28,15 @@ REM 2) dynamic extensions (sockets is NOT built-in; bcmath IS built-in)
 copy /y "%TPC%\ext\php_pdo_mysql.dll" "%DST%\ext\" >nul
 copy /y "%TPC%\ext\php_sockets.dll" "%DST%\ext\" >nul
 
-REM 3) frontend build output
+REM 3) frontend build output (clean target first so stale bundles don't linger)
+if exist "%DST%\dist" rd /s /q "%DST%\dist"
 if exist "%SRC%dist" xcopy "%SRC%dist" "%DST%\dist\" /e /i /q >nul
 
-REM 4) dump worker business logic (plain PHP) + composer vendor
+REM 4) dump worker business logic (plain PHP) + composer vendor (clean targets first)
+if exist "%DST%\bin" rd /s /q "%DST%\bin"
+if not exist "%DST%\bin" mkdir "%DST%\bin"
 copy /y "%SRC%bin\dump_worker.php" "%DST%\bin\" >nul
+if exist "%DST%\vendor" rd /s /q "%DST%\vendor"
 if exist "%SRC%vendor" xcopy "%SRC%vendor" "%DST%\vendor\" /e /i /q >nul
 
 REM 5) php.ini with package-local extension_dir (absolute path written here)
