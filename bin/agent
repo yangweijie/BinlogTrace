@@ -1,0 +1,82 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * bin/agent — 开发用 CLI 入口（php 解释器直接跑，无需编译）
+ *
+ * 与编译二进制 src/main.php 走同一套引导（Runtime::init + EnvLoader + .env 端口解析），
+ * 使 dev 与 embed 行为一致。dump 子进程在 cli 下用 PHP_BINARY 直跑磁盘脚本。
+ *
+ * 用法：
+ *   php bin/agent serve [--host 0.0.0.0] [--port 8080]   （--port 覆盖 .env）
+ *   php bin/agent help
+ */
+
+use DmsAgent\EnvLoader;
+use DmsAgent\Runtime;
+use DmsAgent\Server;
+
+$root = dirname(__DIR__);
+
+// 自动加载（项目 vendor）
+$autoload = $root . '/vendor/autoload.php';
+if (!is_file($autoload)) {
+    fwrite(STDERR, "未找到 {$autoload}。请先运行: composer install\n");
+    exit(1);
+}
+require $autoload;
+
+// 与 embed 一致的引导：二进制（脚本）同级 .env 指定端口
+Runtime::init($argv[0] ?? '');
+EnvLoader::load(Runtime::$binDir . '/.env');
+
+$args = array_slice($argv, 1);
+$cmd = $args[0] ?? 'help';
+
+if ($cmd === 'help' || $cmd === '--help' || $cmd === '-h') {
+    echo <<<EOT
+DMS Agent — 轻量 MySQL binlog 追踪代理（CLI + 原生 HTTP 服务）
+
+用法:
+  php bin/agent serve [--host <ip>] [--port <port>]   启动 HTTP 服务
+  php bin/agent help                                  显示本帮助
+
+路由（前端对接）:
+  POST /connect   测试连接 + 采集元数据，返回 connected 帧（含 session）
+  POST /query     session 只读查询
+  POST /dump      session 启动 binlog 解析（SSE 长流: dump-started → binlog-change → binlog-end）
+  POST /close     销毁会话
+
+注意:
+  首次运行需先安装依赖: composer install
+  （依赖 krowinski/php-mysql-replication，不依赖 workerman / thinkphp）
+  端口可经 .env 的 PORT 指定（与本脚本同级），--port 可覆盖
+
+EOT;
+    exit(0);
+}
+
+if ($cmd !== 'serve') {
+    fwrite(STDERR, "未知命令: {$cmd}\n用法: php bin/agent serve [--host <ip>] [--port <port>]\n");
+    exit(1);
+}
+
+$host = EnvLoader::get('HOST', '127.0.0.1');
+$port = EnvLoader::getInt('PORT', 8080);
+for ($i = 1; $i < count($args); $i++) {
+    if ($args[$i] === '--host' && isset($args[$i + 1])) {
+        $host = $args[++$i];
+    } elseif ($args[$i] === '--port' && isset($args[$i + 1])) {
+        $port = (int) $args[++$i];
+    }
+}
+
+if (!class_exists(\DmsAgent\Server::class)) {
+    fwrite(STDERR, "类 DmsAgent\\Server 未找到，请确认 composer autoload 与 src/ 路径正确。\n");
+    exit(1);
+}
+
+$server = new Server($host, $port);
+$server->run();

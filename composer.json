@@ -1,0 +1,27 @@
+{
+    "name": "dms/binlog-agent",
+    "description": "TypePHP 单包 CLI 应用：自起 Web 服务承载 MySQL binlog 数据追踪（连接/查询/SSE dump/回滚），前后端一体",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.1",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*",
+        "ext-sockets": "*",
+        "krowinski/php-mysql-replication": "^11.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "DmsAgent\\": "src/"
+        }
+    },
+    "scripts": {
+        "post-autoload-dump": []
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "krowinski/php-mysql-replication": true
+        }
+    }
+}

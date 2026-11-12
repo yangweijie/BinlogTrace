@@ -1,0 +1,40 @@
+# 前端构建产物（vite 输出到根 dist/）
+/dist/
+
+# composer 依赖（普通 PHP，随包分发，不入库）
+/vendor/
+
+# TypePHP 编译中间产物
+/build/
+
+# 编译出的二进制及其链接副产物
+/binlog-agent
+/binlog-agent.exe
+/binlog-agent.exp
+/binlog-agent.lib
+
+# 回归探针的编译产物
+/smoke/tp-smoke.exe
+/smoke/tp-smoke.exp
+/smoke/tp-smoke.lib
+/probe/tp-probe.exe
+/probe/tp-probe.exp
+/probe/tp-probe.lib
+
+# 本地运行配置
+/.env
+
+# 打包输出
+/release/
+
+# 探针/构建中间产物
+/probe/build/
+/smoke/build/
+.serena/
+.codebuddy/
+.omc/
+.omo/
+.ohmyagent/
+.codegraph/
+.playwright-cli/
+.workbuddy/
