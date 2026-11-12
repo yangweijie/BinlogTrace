@@ -169,6 +169,11 @@ function dms_probe_one(string $host, int $port, string $user, string $password, 
             ->withBinLogPosition('4')
             ->withHeartbeatPeriod(2) // 空文件时快速解除阻塞读
             ->withEventsOnly([
+                // V1 行事件必须订阅：log_bin_use_v1_row_events=ON 的实例（如阿里云 RDS）
+                // 发 23/24/25，只订 V2 会被 ignoreEvent 静默丢弃 → 永远 0 变更
+                ConstEventType::WRITE_ROWS_EVENT_V1->value,
+                ConstEventType::UPDATE_ROWS_EVENT_V1->value,
+                ConstEventType::DELETE_ROWS_EVENT_V1->value,
                 ConstEventType::WRITE_ROWS_EVENT_V2->value,
                 ConstEventType::UPDATE_ROWS_EVENT_V2->value,
                 ConstEventType::DELETE_ROWS_EVENT_V2->value,
@@ -244,6 +249,11 @@ function dms_dump_worker_main(array $args): void
             // 心跳 5s：历史窗口越过 endTs 后无新行事件时，靠心跳时间戳兜底退出（60s 太久）
             ->withHeartbeatPeriod(5)
             ->withEventsOnly([
+                // V1 行事件必须订阅：log_bin_use_v1_row_events=ON 的实例（如阿里云 RDS）
+                // 发 23/24/25，只订 V2 会被 ignoreEvent 静默丢弃 → 永远 0 变更
+                ConstEventType::WRITE_ROWS_EVENT_V1->value,
+                ConstEventType::UPDATE_ROWS_EVENT_V1->value,
+                ConstEventType::DELETE_ROWS_EVENT_V1->value,
                 ConstEventType::WRITE_ROWS_EVENT_V2->value,
                 ConstEventType::UPDATE_ROWS_EVENT_V2->value,
                 ConstEventType::DELETE_ROWS_EVENT_V2->value,
