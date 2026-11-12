@@ -30,6 +30,13 @@ final class Server
     private array $errKeys = [];
     private int $heartbeatSec = 15;
     private float $lastHeartbeat = 0;
+    /** 进程启动时间戳（/ping 的 uptime 用；bin 模式下 $_SERVER 不可靠） */
+    private static float $startedAt = 0;
+
+    public static function uptimeSec(): int
+    {
+        return self::$startedAt > 0 ? (int) (microtime(true) - self::$startedAt) : 0;
+    }
 
     public function __construct(
         private string $host,
@@ -56,6 +63,7 @@ final class Server
         fwrite(STDOUT, "agent: Ctrl+C 停止\n");
 
         $this->lastHeartbeat = microtime(true);
+        self::$startedAt = $this->lastHeartbeat;
 
         while (true) {
             $this->tick();
@@ -100,9 +108,9 @@ final class Server
         }
 
         // 2) 客户端可读（请求数据到达 / 连接关闭）
-        foreach ($this->clients as $id => $c) {
+        foreach ($this->clients as $cid => $c) {
             if ($c->closed()) {
-                unset($this->clients[$id]);
+                unset($this->clients[$cid]);
                 continue;
             }
             if (!$c->dispatched() && in_array($c->stream(), $read, true)) {
@@ -113,11 +121,11 @@ final class Server
                     if (!$c->keepAlive()) {
                         // 短响应：写完后关闭（SSE 连接会 keepAlive 保持）
                         $c->close();
-                        unset($this->clients[$id]);
+                        unset($this->clients[$cid]);
                     }
                 } elseif ($c->eof()) {
                     $c->close();
-                    unset($this->clients[$id]);
+                    unset($this->clients[$cid]);
                 }
             }
         }

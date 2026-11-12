@@ -135,8 +135,8 @@ final class ClientConn
         return $this->request;
     }
 
-    /** 短响应（connect/query/close）。headers 缺省为 CORS 头。 */
-    public function respond(string $body, ?array $headers = null, int $code = 200): void
+    /** 短响应（connect/query/close/静态文件）。headers 缺省为 CORS 头。 */
+    public function respond(string $body, ?array $headers = null, int $code = 200, string $contentType = 'application/json; charset=utf-8'): void
     {
         if ($this->sse) {
             return;
@@ -152,7 +152,7 @@ final class ClientConn
         $status = $map[$code] ?? '500 Internal Server Error';
         $out = "HTTP/1.1 {$status}\r\n";
         $out .= "Connection: close\r\n";
-        $out .= "Content-Type: application/json; charset=utf-8\r\n";
+        $out .= "Content-Type: {$contentType}\r\n";
         $out .= "Content-Length: " . strlen($body) . "\r\n";
         foreach ($headers as $k => $v) {
             $out .= "{$k}: {$v}\r\n";

@@ -31,7 +31,8 @@ final class AgentHandler
     private string $mysqlUser = '';
     private string $mysqlPassword = '';
     private string $mysqlDatabase = '';
-    private int $mysqlTimeoutMs = AgentConstants::CONNECT_TIMEOUT_MS;
+    // 注意：属性默认值不能引用其他类的常量（TypePHP stub 生成器限制），在构造器中初始化
+    private int $mysqlTimeoutMs;
     private int $serverId;
     private string $binlogFile = '';
 
@@ -49,6 +50,7 @@ final class AgentHandler
     public function __construct()
     {
         $this->serverId = random_int(1, 2147483647);
+        $this->mysqlTimeoutMs = AgentConstants::CONNECT_TIMEOUT_MS;
     }
 
     // ─── 通道注入（由 Router/Server 设置） ──────────────────
@@ -214,16 +216,28 @@ final class AgentHandler
         $startTs = (int) ($payload['startMs'] ?? 0) > 0 ? intdiv((int) $payload['startMs'], 1000) : 0;
         $endTs = (int) ($payload['endMs'] ?? 0) > 0 ? intdiv((int) $payload['endMs'], 1000) : 0;
 
-        $worker = __DIR__ . '/../bin/mysqlbinlog_dump.php';
-        if (!is_file($worker)) {
-            $this->sse($id, 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => 'krowinski 解析脚本缺失']);
+        // dump worker 的两种拉起方式：
+        //   embed（编译二进制）：再次拉起自身二进制，走 __dump_worker 隐藏子命令，
+        //     子进程经 ZendVM 执行磁盘上的 vendor/ + bin/dump_worker.php（单二进制分发）
+        //   cli（php 解释器开发模式）：PHP_BINARY 直接执行磁盘脚本
+        $isEmbed = PHP_SAPI === 'embed';
+        if ($isEmbed) {
+            $workerCheck = Runtime::$binDir . '/bin/dump_worker.php';
+        } else {
+            $workerCheck = __DIR__ . '/../bin/dump_worker.php';
+        }
+        if (!is_file($workerCheck)) {
+            $this->sse($id, 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => 'dump 解析脚本缺失: ' . $workerCheck]);
             return;
         }
 
         $env = array_merge(getenv(), ['DMS_MYSQL_PASSWORD' => $this->mysqlPassword]);
-        $cmd = escapeshellarg(PHP_BINARY)
-            . ' ' . escapeshellarg($worker)
-            . ' --host ' . escapeshellarg($this->mysqlHost)
+        if ($isEmbed) {
+            $cmd = escapeshellarg(Runtime::$binPath) . ' __dump_worker';
+        } else {
+            $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($workerCheck);
+        }
+        $cmd .= ' --host ' . escapeshellarg($this->mysqlHost)
             . ' --port ' . $this->mysqlPort
             . ' --user ' . escapeshellarg($this->mysqlUser)
             . ' --file ' . escapeshellarg($fileName)
@@ -242,7 +256,7 @@ final class AgentHandler
                 2 => ['pipe', 'w'],
             ],
             $pipes,
-            __DIR__ . '/..',
+            Runtime::$binDir,
             $env,
             ['bypass_shell' => true]
         );

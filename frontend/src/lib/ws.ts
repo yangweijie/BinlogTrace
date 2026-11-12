@@ -15,8 +15,12 @@ import type {
 } from '../types/api';
 import type { StartDumpOptions } from './session';
 
-/** 代理地址默认值（binlog-agent）；由构造参数 agentUrl 覆盖，与 MySQL 主机/端口无关 */
-const DEFAULT_BASE = 'http://127.0.0.1:8080';
+/** 代理地址默认值（binlog-agent）；由构造参数 agentUrl 覆盖，与 MySQL 主机/端口无关。
+ *  嵌入式部署：前端由 agent 二进制自身在 .env 指定端口上伺服，默认同源（端口跟随 .env）。 */
+const DEFAULT_BASE =
+  typeof window !== 'undefined' && window.location.origin.startsWith('http')
+    ? window.location.origin
+    : 'http://127.0.0.1:8080';
 
 function rid(): string {
   return 'c' + Math.random().toString(36).slice(2, 10);

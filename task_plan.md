@@ -1,127 +1,53 @@
-# Task Plan: 打通「查 binlog → 找变更 SQL → 生成回滚 SQL」链路
+# Task Plan — TypePHP DMS 单二进制 CLI 应用（自起 Web 服务）
 
-## Goal
-让前端「选时间点拉取」能正确捕获真实 MySQL 的历史行变更，并支持按时间窗口（start/end）
-定位 binlog 文件与位置、只输出窗口内变更、结束后及时 finalize。
+## 目标（用户原话）
+参考 `D:\git\php\bak\webman_dms`，用 typephp 重新实现一个 **cli 应用**：
+1. 打包后（编译成原生二进制）运行时**自己起 web 服务**
+2. **关闭二进制后自动退出 web 服务**
+3. 通过**二进制同级 `.env` 文件指定端口**（前端监听端口也跟着变）
 
-## Context
-- 本仓库是 TypePHP DMS：`parser/`(WASM) + `agent/`(native) + `agent-workerman/`(纯 PHP Workerman，
-  免编译器) + `frontend/`(React 18 + Vite)。
-- 真实 binlog 解析最终落在 **agent-workerman**：`krowinski/php-mysql-replication` 库（纯 PHP、
-  同步阻塞）跑在独立子进程，绕过 WASM 手写解码 NEWDECIMAL/DATETIME2 的短板与 tpc 重建障碍。
-- 架构边界：agent 只做「头解析 + 0x00 前缀/CRC 尾部剥离 + eventSize 修正 + 透传」，行值解码
-  交给 krowinski 子进程；前端真实模式消费 `binlog-change` 帧，**不再调 WASM parse-binlog**
-  （demo 仍走 WASM）。
+## 现状盘点（已验证）
+- 工作区 `D:\git\php\typephp_dms`（分支 typephp）已从 HEAD 恢复 `agent/` + `frontend/`，其余 372 个文件处于删除状态（旧 webman/parser/agent-workerman 实现，是参考不是目标）。
+- `agent/`（HEAD）= 零依赖 PHP HTTP 服务（stream_socket_server + stream_select + SSE + PDO MySQL + mysqlbinlog 子进程），入口 `src/main.php` 已是 TypePHP bin-mode 写法（main()），路由 /ping /connect /query /dump /close 与 webman_dms 对齐。**尚未真正用 tpc 编译过**（无从验证记录）。
+- `frontend/`（HEAD）= React 18 + Vite 7 源码，默认 agent 地址硬编码 `http://127.0.0.1:8080`（`lib/ws.ts:19`、`components/AgentConfig.tsx:6`，localStorage key `dms-agent-url`）。
+- tpc v0.9.5 可用：`D:\git\php\tpc_v0.9.5_windows_x64\tpc`（已在 PATH）。Node v24 可用（bun 也有）。
+- typephp-mcp 不可用 → 用 `tpc --dry` 直接当检查器（skill 规定的回退路径）。
+
+## 关键架构决策
+| 决策 | 结论 | 理由 |
+|------|------|------|
+| 代码基座 | 复用 agent/，不推倒重来 | 架构即"CLI 自起 web 服务"，与目标同构；ub-mode: Make it Work 优先 |
+| 关闭二进制→web 服务退出 | 进程内 HTTP 服务（stream_socket_server），无需额外机制 | 进程死=服务死，天然满足 |
+| 端口配置 | main() 读二进制同目录 `.env` 的 `PORT=`，命令行 --port 可覆盖 | 明确需求 |
+| 前端承载 | 前端 build 产物经 project.yml `embedded-files` 嵌入二进制，Router 增加静态文件路由，同端口同源 | "前端监听端口跟着变"自动成立 |
+| 前端默认地址 | 改为 `window.location.origin`（同源），保留 localStorage 覆盖能力 | 嵌入式同源部署 |
+| dump（binlog 解析） | 先保 PHP 子进程+mysqlbinlog 语义在解释器下工作；二进制版用隐藏子命令 `__dump_worker` 让二进制自我复用（PHP_BINARY=自身）；若 proc_open 不可用则降级/替代 | 单二进制不能 require 外部 php |
+| .env 解析 | 手写极简 parser（KEY=VALUE 行，# 注释） | typephp 无 vlucas/phpdotenv，别引依赖 |
 
 ## Phases
+- [x] Phase 0 现状盘点 + 参考项目调研（Explore 报告在 findings.md）
+- [x] Phase 1 前端：默认地址改同源 + vite build 产物可用（265K dist）
+- [x] Phase 2 agent/ TypePHP 编译适配：dry 全绿 → 真实编译链接通过（rung 2+3）
+- [x] Phase 3 功能补齐：.env 端口 + 静态文件路由（dist 同目录）+ dump 自我拉起 __dump_worker
+- [x] Phase 4 rung 4 端到端验证：.env 端口生效、/ping、/connect（驱动真实 TCP）、前端伺服、遍历拦截、404、关闭进程端口即死、CLI 覆盖 .env
+- [x] Phase 5 打包验收：package.bat 组包 22MB → 独立目录 + 最小 PATH 全通过；浏览器视觉验收（SPA 渲染 + "代理已连接"）
+- [ ] Phase 6 提交（小步、按 ub-mode 规范）
 
-- [x] **Phase A — 组帧修复**（agent 侧，已完成）
-  - [x] `AsyncClient::handleBinlogPacket` 剥离每事件包前置 0x00（仅当偏移 1 解出合法头
-        type 1..42 且 eventSize==实收-1 才剥，防误伤时间戳低字节恰为 0x00 的事件）
-  - [x] 剥离 CRC32 尾部并同步修正头部 eventSize（守卫 `binlogChecksummed && eventSize==实收`）
-  - [x] ROTATE 文件名偏移 23→27（头 19 + pos 8）；此前含 CRC 尾部 → 非法 UTF-8 →
-        `json_encode` false → `sendFrame` 静默丢弃整条流（「无输出」根因之一）
-  - [x] 1236 用 `SET @master_binlog_checksum = @@global.binlog_checksum`（真从库声明方式）
-  - [x] 探针回归：`_probe_dump_frames.php` 整文件重放 binlog.000042 @4，18 事件 17 正确
-
-- [x] **Phase B — 前端单位修复**（已完成）
-  - [x] `useTraceRun` `passedEnd` 秒/毫秒不匹配：`toMs` 以 1e11 阈值归一化后再比 `endMs`
-        （否则真实模式永不结束、按钮一直禁用）
-
-- [x] **Phase C — 集成 krowinski 解析**（agent 侧，已完成）
-  - [x] `bin/krowinski_dump.php` 子进程：JSON 行输出结构化变更
-        `{type:change, kind, schema, table, columns, before, after, xid, timestamp, binlogFile, binlogPos}`
-  - [x] XID 缓冲赋号（行事件在其 XID 之前，须等 XID 再输出，否则 xid 错乱）
-  - [x] `WsHandler::handleBinlogDump` 改为 `proc_open` 启动子进程；stdout 转发 `binlog-change` 帧
-  - [x] **Windows 坑 1**：`proc_open` env 必须 `array_merge(getenv(),[...])` —— 只传 `$_ENV`
-        (CLI 下空) 会丢 PATH/SYSTEMROOT → Winsock 10106，krowinski 无法建连
-  - [x] **Windows 坑 2**：管道 `stream_set_blocking(false)` 在 Windows 上无效，`fread` 会阻塞
-        到子进程输出，长驻 dump 会卡死事件循环（query/heartbeat 全无响应）→ 改 stdout/stderr
-        重定向到 `runtime/krowinski_*.out/.err` 文件 + `Timer`(0.1s) 增量轮询文件
-  - [x] 密码走环境变量 `DMS_MYSQL_PASSWORD`（不进进程列表）
-
-- [x] **Phase D — 时间窗口 + 历史定位**（本轮重点，已完成）
-  - [x] worker 加 `--start-ts/--end-ts`（epoch 秒）：早于 startTs 的行跳过不输出；
-        越过 endTs 的行事件 → 正常退出；无行事件时心跳兜底 `time() > endTs+5` 退出
-  - [x] worker 内定位起点 binlog 文件：PDO `SHOW BINARY LOGS` + 从新到旧逐文件 krowinski
-        探测首行事件 ts；首个 `ts < startTs` 的文件为起点（dump pos 4，窗口前行被 start-ts
-        过滤，无遗漏；**不做文件内二分**）
-  - [x] 心跳周期 60s→5s（历史窗口越过 endTs 后无新行事件时靠心跳快速退出）
-  - [x] `WsHandler` 透传 `startMs/endMs`（epoch 毫秒→秒）给 worker
-  - [x] worker 正常退出（code 0）→ agent 发 `binlog-end` 帧 → 前端 `session.isEnded`
-        立即 finalize（不等 45s 空闲）；异常退出 → `binlog-end` error 帧（带 stderr 尾部）
-  - [x] 前端 `ws.ts` startDump 透传 startMs/endMs；`finalizeStructured` 按 `[startMs,endMs]`
-        过滤变更后再落库跳转
-
-- [x] **Phase E — 结果页 UI 细节**（本轮新增，已完成）
-  - [x] 筛选栏 `.filter-bar` 单行对齐：`.field` 外层 + 空 `.field-error` 占位把 `Select` 撑高到 56px，
-        局部 CSS 覆盖（不改组件）后四子元素垂直对齐
-  - [x] 已存连接同名覆盖：`ConnectPage.doConnect` 按 `name` 复用已有 `id`，消除 `upsertConnection`
-        永远 `unshift` 的同名堆积
-
-- [x] **Phase F — 原生 agent/（TypePHP 编译目标）链路修复**（本轮，已完成）
-  - [x] `Router` v2 信封归一化（修 connect 'host 不能为空' 1008）
-  - [x] 前端 query 结果 `rows` 改 `Record<string,unknown>[]`、按 `columns[0].name` 读列值（修数据库/数据表下拉 `undefined`）
-  - [x] `check-cfg` 权限改 `satisfiesPrivilege` 词边界匹配（修误报）
-  - [x] `TracePage` 挂载时若已持久化预选库则主动 `loadTables(db)`（修表列表空）
-  - [x] `/dump` `Server.php` 的 `stream_select` 崩溃（ended 清理漏 stderr fd + 未过滤非 resource）修复
-  - [x] `mysqlbinlog_dump.php` 透传真实 `proc_get_status` exitcode（不再恒 `exit(0)` 掩盖失败）
-  - [x] `ClientConn::beginSse()` 加 CORS 头（修前端 :5173 → agent :8080 跨域 /dump 错误）
-  - [x] 历史窗 `probeStartFile` 起点定位（新→旧取首事件 ts<startTs 文件，pos 4 起）+ `--to-last-log`（修 24h 0 变更）
-  - [x] `probeOne` descriptors 补 stdin（修 fclose(NULL) 致命）；主命令补 `--to-last-log`（跨文件续读）
-  - [x] 心跳退出加 `$gotData` 闸门（mysqlbinlog 连接间隙 >1s 无数据不按墙钟自杀）
-  - [x] **binlog 解析整体改为纯 PHP krowinski/php-mysql-replication**（替代本地 mysqlbinlog CLI；消除 9.4 缺 mysql_native_password 插件导致的 code=1/1099），与 `AgentHandler::handleDump` 契约一致
-
-- [x] **Phase G — 代理可达性状态派生 + 数据表多选 + 回滚事务开关**（2026-08-26 下午场）
-  - [x] `AppState.agentReachable` + `deriveTopStatus(state)`（demo > WS connected/wsMeta > agentReachable=true > false > WS error > idle）→ 四页面 TopBar 一致
-  - [x] `TraceConfig.table: string` → `string[]`；数据表 / 结果页表筛选均改 MultiSelect，互斥「全部」与具体表（互斥逻辑内聚到 `MultiSelect.exclusiveOption`）
-  - [x] `MultiSelect` 支持 `string | {value,label}` options、`label`、`id`、`exclusiveOption` props；trigger 高度 36px 与 Select 对齐
-  - [x] `krowinski_dump.php` 心跳 `withHeartbeatPeriod(5)`→`2`、兜底退出 `endTs+5`→`endTs+2`（去除 dump 至少卡 5 秒）
-  - [x] TracePage 去除 48h 时间限制；快捷按钮加「近48小时」「近一周」
-  - [x] `rollback-gen.generateRollback(changes, independentTx=false)`：共享事务（首尾各一次）默认 / 独立事务（每 xid 组包裹），RollbackPage 加 checkbox 切换
-
-## Decisions
-| # | Decision | Rationale |
-|---|----------|-----------|
-| 1 | 真实模式绕过 WASM，改用 agent 侧 krowinski | WASM 手写解码 NEWDECIMAL/DATETIME2 有缺陷；tpc 重建有依赖障碍；krowinski 是成熟完整库 |
-| 2 | krowinski 跑独立子进程（非事件循环内） | 同步阻塞库，进 Workerman 事件循环会卡死 |
-| 3 | 起点文件定位放 worker 内（非 AsyncClient peek） | AsyncClient 是单连接，无法并发 peek；探测属 binlog 领域逻辑，内聚在 worker |
-| 4 | 不做文件内二分定位 | 多读部分被 start-ts 过滤，无正确性影响；仅历史很旧时稍慢 |
-| 5 | 心跳兜底用本地 `time()` | krowinski 心跳 `eventInfo->timestamp` 恒为 0（库实现），不可用于比较 |
-| 6 | 原生 agent binlog 解析改用纯 PHP krowinski（替代本地 mysqlbinlog） | 用户要求打包后不依赖本地二进制；本机 mysqlbinlog(9.4) 缺 mysql_native_password 插件连不上远程 5.7；与 agent-workerman 同源一致 |
+## 目标达成对照（用户验收标准 → 证据）
+| 要求 | 证据 |
+|------|------|
+| 用 typephp 重新实现 CLI 应用 | agent/ 全部 src 经 tpc v0.9.5 编译为原生 binlog-agent.exe（Build successful）|
+| 打包后运行自己起 web 服务 | 运行 exe 即监听（/ping 200，sapi=embed），前端同端口伺服 |
+| 关闭二进制后自动退出 web 服务 | taskkill 后 curl 立即 refused（进程内服务）|
+| 二进制同级 .env 指定端口 | .env PORT=9721 → 9721 生效（8080 拒连）；--port 可覆盖 |
+| 前端监听端口跟着变 | 前端由二进制同端口伺服 + 默认地址=location.origin（浏览器验收：9721/8080 均渲染 + "代理已连接"）|
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
-| `socket_create` 10106（Winsock） | 1 | `proc_open` env 改 `array_merge(getenv(),[密码])` |
-| dump 期间 query/heartbeat 全无响应 | 1 | 发现管道 `fread` 阻塞事件循环 → stdout 改文件重定向 + Timer 轮询 |
-| 探测把所有文件误判「更旧」 | 1 | dump 文件头先发 ROTATE 定位事件，`onRotate` 抢置 verdict → ROTATE 不参与判定 |
-| worker 越窗不自行退出 | 1 | 心跳 `eventInfo->timestamp` 恒 0 → 兜底改本地 `time() > endTs+5` |
-| `withBinLogPosition(int)` TypeError | 1 | 签名要 string → `(string)$pos` |
-| 前端 `passedEnd` 永不成立 | 1 | 秒/毫秒单位错 → 1e11 阈值归一化 `toMs` |
-| binlogFile 含 CRC 尾部 → 无输出 | 1 | 剥离 CRC 尾部并修正 eventSize |
-| 结果页筛选栏子元素高度差 28px+ | 1 | `Select` 空 `.field-error` 占位 + `.field` column 布局 → 局部覆盖 |
-| 同名连接反复保存堆积多条 | 1 | `doConnect` 每次 `newId()` → `upsertConnection` 永远 `unshift` → 先按 name 复用 id |
-| 24h 追踪 0 变更（从当前尾巴 pos 读） | 3 | `probeStartFile` 定位起点文件 pos4 + `--to-last-log` |
-| worker code=1 / 1099（mysql_native_password 插件缺失） | 1 | 改纯 PHP krowinski，不再 shell-out 本地 mysqlbinlog |
-| webman connect 返回空元数据 /“未检测到 Binlog/缺权限” | 3 | ① 数据库名 shengyibao 不存在 → 前端填真实库；② Doctrine getConnection 懒连接假成功 → connect() 加 `fetchOne('SELECT 1')` 强制真实建连（勿调 protected 的 connect()）；③ MySQL 9.4 移除 SHOW MASTER STATUS → 改用 SHOW BINARY LOG STATUS + 读 @@server_id |
-| webman `POST /dump` 404 | 1 | 路由仅注册 /binlog-dump，前端调 /dump → route.php 加 /dump 别名 |
-| webman `POST /dump` 1099 脚本缺失 | 1 | WsHandler 用 `__DIR__/../bin`(=app/bin 不存在)，应为 `/../../bin`；runtime/cwd 同步修正到 webman 根 |
-| webman `POST /dump` 浏览器 ERR_INVALID_HTTP | 2 | 响应头手动加 Transfer-Encoding: chunked 与 Workerman 自动编码冲突 → 移除，只留 text/event-stream + Cache-Control + X-Accel-Buffering |
+| (待记录) | | |
 
-## Verification
-- worker 独立探测（startTs=1787414500）：定位 binlog.000042，窗口内 2 条变更（NEWDECIMAL/DATETIME2 值正确）
-- WS 端到端历史窗口：3 条窗口内 `binlog-change` + `binlog-end` 帧
-- 集成测试 `tests/integration_test.php`：11 PASS / 0 FAIL
-- 前端 `tsc --noEmit`：exit=0
-
-## Next Steps
-- [ ] 重启 8080 agent（`taskkill /F /IM php.exe; cd agent-workerman && php start.php start`）+ 刷新 Vite 5173，
-      真实 UI 验证「选时间点拉取」能捕到 order 表变更、下拉可选
-- [ ] 清理临时探针：`tests/_probe_dump_frames.php`、`tests/_probe_parser.php`、`tests/_probe_krowinski.php`、
-      `tests/_probe_dump_flags.php`、`runtime/_e2e_*.php`、`runtime/_repro_f.php`、`runtime/kw_*.log`、`runtime/krowinski.pid`
-- [ ] （可选）probeOne 内加文件内二分，精确到文件内位置（历史很旧时提速）
-- [ ] 【2026-08-27 新增】webman `/dump` 的 ERR_INVALID_HTTP 已修（移除手动 Transfer-Encoding 头），
-      请刷新前端重试一次 `/dump` 做最终肉眼确认（命令行 `runtime/krowinski_*.out` 已证明 SSE 流正常）
-- [ ] 【2026-08-27 新增】前端 `database` 字段校验：连接不存在的库（如 shengyibao）应给明确错误而非笼统 1001
-- [ ] 【2026-08-27 新增】（可选）清理 `runtime/krowinski_*.err` 中 `emit #0 kind=? ts=0` 探测阶段占位帧噪音
+## 风险
+- TypePHP 对 stream_socket_server/stream_select/proc_open 的运行时支持未验证（最大风险，Phase 2 尽早触发 rung 4 冒烟）
+- 前端 build 产物体积与 embedded-files 机制可行性未验证
+- Windows 下 .env 同目录定位：PHP_BINARY 在编译二进制中的取值需实测

@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "7ec72792fbffbc81bd51b2b12c9bc8a6",
+    "content-hash": "9c22e38fb27548c5327bb63c10755664",
     "packages": [
         {
             "name": "doctrine/collections",
@@ -248,16 +248,11 @@
         },
         {
             "name": "krowinski/php-mysql-replication",
-            "version": "v9.0.0",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/krowinski/php-mysql-replication.git",
-                "reference": "0ca0094e6d98eb7edad4fcea7712f42b7e81f843"
-            },
+            "version": "v11.1.0",
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/krowinski/php-mysql-replication/zipball/0ca0094e6d98eb7edad4fcea7712f42b7e81f843",
-                "reference": "0ca0094e6d98eb7edad4fcea7712f42b7e81f843",
+                "url": "https://mirrors.cloud.tencent.com/repository/composer/krowinski/php-mysql-replication/v11.1.0/krowinski-php-mysql-replication-v11.1.0.zip",
+                "reference": "76623ff881f065cb1ce431d2a3f62bb2bb66123d",
                 "shasum": ""
             },
             "require": {
@@ -269,13 +264,14 @@
                 "php": ">=8.2",
                 "psr/log": "^3.0",
                 "psr/simple-cache": "^3.0",
-                "symfony/event-dispatcher": "^6.0|^7.0"
+                "symfony/event-dispatcher": "^6.0|^7.0|^8.0"
             },
             "require-dev": {
                 "kubawerlos/php-cs-fixer-custom-fixers": "^3.19",
                 "monolog/monolog": "^3.5",
-                "phpstan/phpstan": "^1.10",
-                "phpunit/phpunit": "^11.0",
+                "phpstan/phpstan": "^2.2",
+                "phpstan/phpstan-strict-rules": "^2.0",
+                "phpunit/phpunit": "^12.0",
                 "symplify/easy-coding-standard": "^12.1"
             },
             "type": "library",
@@ -284,7 +280,6 @@
                     "MySQLReplication\\": "src/MySQLReplication/"
                 }
             },
-            "notification-url": "https://packagist.org/downloads/",
             "license": [
                 "MIT"
             ],
@@ -306,9 +301,9 @@
             ],
             "support": {
                 "issues": "https://github.com/krowinski/php-mysql-replication/issues",
-                "source": "https://github.com/krowinski/php-mysql-replication/tree/v9.0.0"
+                "source": "https://github.com/krowinski/php-mysql-replication/tree/v11.1.0"
             },
-            "time": "2025-09-17T09:42:36+00:00"
+            "time": "2026-07-21T08:36:21+00:00"
         },
         {
             "name": "psr/cache",
@@ -769,5 +764,5 @@
         "ext-sockets": "*"
     },
     "platform-dev": {},
-    "plugin-api-version": "2.6.0"
+    "plugin-api-version": "2.9.0"
 }

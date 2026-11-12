@@ -1,0 +1,5 @@
+name: tp-smoke
+mode: bin
+output: tp-smoke
+sources:
+  - main.php

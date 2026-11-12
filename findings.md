@@ -1,130 +1,55 @@
-# Findings — Phase 3 浏览器内 MySQL 数据追踪工具
+# Findings — TypePHP DMS
 
-## 真实 binlog 解析：krowinski/php-mysql-replication（agent-workerman）
-- 库版本 `^11.1`，支持 MySQL 8.0 + caching_sha2；依赖 doctrine/dbal + pdo_mysql（均已装）。
-- **纯 PHP、同步阻塞**（`Socket::recv` + `MSG_WAITALL`，`consume()` 是死循环），
-  `runWithStopCheck` 的 stop 回调只在每次 `consume()` 完成后检查 → dump 追平文件尾后
-  `getResponse()` 永久阻塞，stop 回调轮不到。⇒ 必须跑独立子进程，不能进 Workerman 事件循环。
-- 探针已验证：`test.order` UPDATE 全解对 —— `total_amount` NEWDECIMAL(10,2) → `"99.99"`/`"100.00"`
-  （保留两位）、`created_at`/`updated_at` DATETIME2 → `"2026-02-13 03:45:08"`，before/after 完整。
-- **API 关键点**：
-  - `ConfigBuilder::withBinLogPosition(string)` 要字符串（传 int 报 TypeError）。
-  - `RowsDTO`（WriteRowsDTO/UpdateRowsDTO/DeleteRowsDTO）的 `eventInfo` 是 protected，用
-    `$event->getEventInfo()`；`values` 是 `array[]`，每行 `['before'=>..., 'after'=>...]`
-    （insert 行无前缀直接是列映射）。
-  - `ConstEventType::XID_EVENT` 等枚举取 `->value`。
-  - **心跳事件 `HeartbeatDTO::getEventInfo()->timestamp` 恒为 0**（库实现如此），
-    不能用它判断「服务器当前时间」→ 心跳兜底退出要用本地 `time()`。
-  - **dump 文件头时服务端先发一个 ROTATE 定位事件**（指向被 dump 的文件），
-    探测首行事件 ts 时 `onRotate` 会抢在行事件前触发 → ROTATE 不能参与判定。
+## 参考项目 webman_dms（Explore agent 报告要点，2026-11-12）
+- 架构：React SPA（public/ 已构建，无源码）+ webman HTTP 后端（单进程 8080）。后端不做回滚 SQL 生成（前端 Web Worker 纯 JS generateRollback），只做：MySQL 代理查询、元数据采集、krowinski 子进程 binlog 解析 → SSE 推流。
+- API 表（协议 v2 帧 `{v,id,type,ts,payload}`）：
+  - GET/POST /ping → `{ok:true,...}`
+  - POST /connect `{host,port,user,password,database,connectTimeoutMs,serverId?}` → 单帧 connected（meta+session 32hex token，内存 Map）
+  - POST /query `{sql,database?,session}` → query-result `{columns:[{name,type}],rows}`（SELECT|SHOW 白名单，独立查询连接，按库重建）
+  - POST /binlog-dump 别名 /dump `{binlogFile,binlogPos,startMs,endMs,session}` → SSE：dump-started → binlog-change* → heartbeat(15s) → binlog-end{exitCode:0} | error
+  - POST /close `{session}` → `{ok:true}`
+  - binlog-change payload: `{kind:"insert|update|delete",schema,table,columns[],primaryKeys[],before,after,xid,timestamp,binlogFile,binlogPos}`
+- 错误码：1001 AUTH_FAILED 1002 NETWORK_UNREACHABLE 1003 BINLOG_DISABLED 1004 PERMISSION_DENIED 1005 PARSE_ERROR 1006 PROXY_NOT_READY 1007 TIMEOUT 1008 INVALID_PARAM 1009 SERVER_ID_CONFLICT 1010 PROTOCOL_ERROR 1011 BINLOG_POSITION_INVALID 1012 TRANSACTION_COMPRESSED 1013 META_MISSING 1099 INTERNAL_ERROR
+- MetaGatherer 7 条 SQL：SHOW BINARY LOG STATUS / SHOW MASTER STATUS（二选一）、@@server_id、@@binlog_format、@@binlog_row_image、@@version、SHOW GRANTS（解析 SELECT/REPLICATION SLAVE/REPLICATION CLIENT；ALL PRIVILEGES 全有）
+- binlog 解析：krowinski/php-mysql-replication v11.1.0 子进程（bin/krowinski_dump.php 385 行）：订阅 WRITE/UPDATE/DELETE_ROWS_EVENT **V1+V2**+XID+ROTATE+HEARTBEAT_LOG_EVENT；XID 事件给 pending 行赋 xid；startTs 起点文件探测（SHOW BINARY LOGS 从新到旧，每文件短命 factory 8s 上限）；心跳兜底退出 time()>endTs+2。密码走 env DMS_MYSQL_PASSWORD。Windows 下 proc_open 管道非阻塞无效 → stdout 重定向文件 + 0.1s Timer 轮询。
+- 前端：React 18 + Vite、hash 路由（/ 连接页、/trace、/rollback）、fetch POST JSON 帧、dump 用 fetch+getReader 手动分 SSE（POST 无法用 EventSource）、agent 地址 localStorage `dms-agent-url` 默认 http://127.0.0.1:8080。
+- generateRollback（前端纯 JS）：null→NULL、数字原样、X'..'原样、字符串 '...'（\→\\、'→''）；insert→DELETE、update→UPDATE(仅变更列)、delete→INSERT(before 镜像)；WHERE PK 优先；按 xid 分组、组内最大 ts 降序；START TRANSACTION 包裹可选。
 
-## 起点 binlog 文件定位算法（worker 内）
-```
-PDO SHOW BINARY LOGS（按名升序 binlog.000040 < ... < 000042，末个=当前文件）
-  → 反转从新到旧，逐文件 krowinski dump pos 4 读首行事件 ts
-     ├─ ts < startTs → 该文件为起点（dump pos 4，--start-ts 过滤窗口前行，无遗漏）
-     └─ ts ≥ startTs → 取更旧文件
-  → 全部 ≥ startTs → 用最旧文件（起点早于全部可用 binlog，无遗漏）
-```
-- 不做文件内二分：多读的部分被 `--start-ts` 过滤，无正确性影响，仅历史很旧时探测稍慢。
-- 心跳周期降到 5s（历史窗口越过 endTs 后无新行事件时靠心跳 `time() > endTs+5` 快速退出）。
+## 本仓库 HEAD 现状
+- `agent/` = 上述功能的零依赖实现：stream_socket_server + stream_select 事件循环（Server.php 208 行），ClientConn HTTP 解析/SSE，Router，AgentHandler（PDO 连接/查询/dump 子进程 proc_open 管道非阻塞——PHP 8 Windows 下 OK），MetaGatherer，PdoConnection（pdo_mysql），mysqlbinlog_dump.php（**调用外部 mysqlbinlog --read-from-remote-server**，非 krowinski）。入口 src/main.php（TypePHP bin mode：main(argc,argv)）。
+- project.yml: `name: binlog-agent, mode: bin, output: binlog-agent, sources: [src], ext-deps: [pdo pdo_mysql]`（注意 ext-deps 一行两个值，格式待验证）
+- `frontend/` = React 源码（vite 7, bun.lock + package-lock），默认 URL 硬编码 8080（ws.ts:19, AgentConfig.tsx:6）
+- git 工作区：仅恢复 agent/ frontend/，其余删除态是旧实现（webman/ agent-workerman/ parser/），不作目标。
 
-## Windows 坑（agent-workerman，proc_open 子进程）
-1. **env 必须 `array_merge(getenv(), [...])`**：只传 `$_ENV`（CLI 下常为空）会整体替换子进程
-   环境、丢 PATH/SYSTEMROOT → `socket_create` 10106（Winsock 未初始化），krowinski 无法建连。
-2. **管道 `stream_set_blocking(false)` 在 Windows 上是 no-op**：`fread` 会阻塞到子进程有输出，
-   长驻 dump（追平文件尾后无输出）会卡死 Workerman 事件循环，表现为 dump 期间 query/heartbeat
-   全无响应。⇒ 子进程 stdout/stderr 重定向到 `runtime/krowinski_*.out/.err` 文件，`Timer`(0.1s)
-   增量轮询文件（记录已读 offset）。
+## 环境事实
+- tpc v0.9.5 Windows x64 在 PATH（/d/git/php/tpc_v0.9.5_windows_x64/tpc）；该目录含 SDK/、ext/、build/、examples/ 等
+- Node v24.10.0 + npm + bun 可用（PhpWebStudy 环境）
+- typephp-mcp **不可用**（工具列表无 mcp__typephp__*）→ 遵循 skill 回退：读 skill references + tpc --dry 直接验证
+- 关键 skill 提醒：check_code/tpc --dry 只到 rung 1；undefined symbol/运行时错不报；必须真编译+运行才算数
 
-## 组帧修复（agent AsyncClient，已完成）
-- MySQL 每个 binlog 事件包 payload **前置 1 字节 0x00**（8.0.36 实测恒有），真实事件在偏移 1。
-  未剥离时 eventType 解成 106（非法，官方 0–42）→ 前端只留 19/30/31/32/16，全被过滤 → 无输出。
-- 剥离守卫：仅当偏移 1 解出合法头（type 1..42 且 eventSize==实收-1）才剥，防误伤时间戳低字节恰为 0x00 的事件。
-- CRC32 尾部：`binlogChecksummed && eventSize==实收` 时剥 4 字节并同步减 eventSize；
-  1236 用 `SET @master_binlog_checksum = @@global.binlog_checksum` 声明兼容。
-- ROTATE 文件名在偏移 27（头 19 + pos 8），此前按 23 读会带 CRC 尾部 4 字节 → 非法 UTF-8 →
-  `json_encode` 返回 false → `sendFrame` 静默丢弃（「无输出」另一根因）。
-- 合法事件类型：ROTATE(4)/FDE(15)/QUERY(2)/GTID(34,35)/TABLE_MAP(19)/WRITE(30)/UPDATE(31)/DELETE(32)/XID(16)。
+## 待验证问题（开放）
+- [x] stream_socket_server/stream_select/proc_open 在 TypePHP 二进制中可用（smoke rung-4 实测 ✅）
+- [x] PHP_BINARY 在编译二进制中 = **tpc.exe（编译器路径），不可用**；`$argv[0]` = 真实二进制全路径 ✅（.env 定位用它）；__DIR__ = 编译期源码路径，不可用于运行期
+- [ ] project.yml embedded-files 机制与取用 API（frontend dist 嵌入）
+- [x] ext-deps 写法（未用——见下）
+- [x] tpc 支持 declare(strict_types)/heredoc/match（11 文件 dry 全绿）
+- [x] **TP-AOT-021（pdo_mysql 缺失）解法**：embed SAPI 会读**二进制同目录的 php.ini**（跨 cwd 实测 ✅）。部署布局：`binary + php.ini + php_pdo_mysql.dll(+依赖DLL)` 同目录。`dl()` 不可用（false），php.ini 自动加载才是正道。PDO 抛真实连接错误证明驱动工作。
+- [x] dump 子进程：**自我拉起方案验证通过**——`binlog-agent.exe __dump_worker ...` 子进程内 embed SAPI 经 ZendVM require 磁盘 vendor/ + bin/dump_worker.php，krowinski 类真实发起 socket 连接（无 MySQL 时报连接拒绝=预期）。SSE 全链路（binlog-change 流）待真实 MySQL 环境联调。
+- [x] 环境故障记录：**tpc 手动调用必须先 source vcvars64.bat**（否则 C1083 malloc.h/cstring）。已建 `agent/tpc-build.bat` 包装（注意：bat 内不能有括号块 + 中文注释须 ASCII）
 
-## 前端契约
-- 真实模式消费 `binlog-change` 帧 `{kind, schema, table, columns, before, after, xid, timestamp, binlogFile, binlogPos}`，
-  `useTraceRun.finalizeStructured` 映射成 `Change`（值统一 string|null），**不调 WASM parse-binlog**（demo 才走 WASM）。
-- `passedEnd`/窗口过滤的 `toMs`：`t > 1e11 ? t : t*1000`（agent 事件 ts 是 epoch 秒，endMs 是毫秒；
-  1e11=1973 年为阈值）。
-- worker 正常退出 → `binlog-end` 帧 → `session.isEnded` finalize；不等 45s 空闲。
+## Phase 3-5 新增实测结论（2026-11-12）
+- **embedded-files 在 tpc v0.9.5 Windows 发行版不可用**：缺 `phpx/thirdparty/opcache/opcode_unserialize_85.c`（及 header），公开 GitHub 仓库无 phpx 源码可补 → 放弃嵌入，改随包目录（dist/ + vendor/ + bin/dump_worker.php）。
+- **`$GLOBALS` 编译不支持**（C2065 未声明的标识符）。
+- **cwd 的 php.ini 会破坏 tpc 自身**：agent/php.ini（为编译产物准备）被 tpc 的 PHP CLI 从 cwd 加载 → typephp_tpc 模块启动失败；PHPRC 置空无效（Windows CLI 仍搜 cwd）→ 构建脚本须切到无 php.ini 的 cwd（tpc-build.bat 已做）。
+- **ext-deps 陷阱**：project.yml 里 `ext-deps: [- "pdo pdo_mysql"]` 整串当模块名 → 启动 fatal "required module not found"；本项目不需要声明（\PDO 类运行时解析）→ 已删除。
+- **扩展可用性（embed 运行时，PHP 8.5.11 ZTS）**：bcmath **内置**（无 dll 文件但 bcadd 可用）；sockets **非内置**（必须随包 php_sockets.dll，否则 krowinski socket_create 未定义）；pdo_mysql 动态（php_pdo_mysql.dll，仅依赖 php8ts）。
+- **embed SAPI 运行期 require 磁盘普通 PHP 完全可用**（探针实证：类加载、方法调用正常）→ dump worker 用普通 PHP 随包，绕开 AOT 限制且保留 krowinski 原生语义。
+- **二进制 DLL 依赖闭包**（deplister 实测）：exe→php8ts/phx/libmpdec++；phpx→php8ts/gmp-10/**mpfr-6**/libmpdec*。注意 mpfr 文件名是 mpfr-6.dll。
+- **embedded 原始文件可经编译期 `__DIR__` 绝对路径读取**（opcode 表按路径键取）——但部署机无此路径，不可依赖；仅作机制备忘。
 
-## 结果页筛选栏单行对齐（2026-08-23）
-- `frontend/src/pages/ResultPage.tsx` 的 `.filter-bar` 用了 `display:flex; flex-wrap:nowrap; align-items:center`，
-  但子元素高度差 28px+（`filter-pills` 26px 高 vs `Select` 56px 高），视觉上下拉被顶到胶囊下方。
-- 根因在 `Select.tsx`：始终渲染 `<div class="field">`（`display:flex; flex-direction:column; gap:4px;
-  margin-bottom:16px`），即使无错误也含一个 `<div class="field-error" role="alert">`（`min-height:16px`）。
-- **不改组件**：在 `frontend/src/styles/components.css` 已有 `.filter-bar .select-sm` 规则附近加：
-  `.filter-bar .field { min-width:0; margin-bottom:0; }` + `.filter-bar .field-error { display:none; }`
-  并用注释标明是有意覆盖（防御未来"清理无意义规则"误删）。
-- 验证：`evaluate_script` 测得四子元素 centerY 全部为 123（修复前 131/123 两种），`.filter-bar` 高从 72px 降到 26px。
-- `frontend/src/pages/ConnectPage.tsx` `runSaved()`：`useDemo: false`（已修复）——已存真实连接点击后强制真实代理，不再残留演示模式状态
-
-## 本轮发现（MySQL 认证 + 前端状态清理）
-- `AsyncClient` 的 `mysql_native_password` 认证在 `MySQL 5.7.43` + `mysql_native_password` 插件下仍然 `1045`（`krowinski` 同服务器认证通过 → 证明不是服务器限制，而是 `AsyncClient` 协议实现缺陷）
-- `agent-workerman` 的真实 `binlog-dump` 本就不依赖 `mysql` 主连接（走 `krowinski_dump.php` 子进程 + `proc_open`），因此可安全将 `mysql` 主连接也替换为 `KrowinskiQueryAdapter`
-- `adapter` 连接成功后 `MetaGatherer` 执行 `SHOW MASTER STATUS` 正常返回（`File` + `Position`），`serverVersion` 正常（`5.7.43-log`），`userPrivileges` 正常（`SELECT` + `REPLICATION SLAVE` + `REPLICATION CLIENT`）
-- 前端 `undefined` 下拉：源自 `adapter` `columns` 一直为空数组（`fetchAllAssociative()` 结果没有被正确解析为列名）→ 改 `PDO::FETCH_NUM` + `getColumnMeta()` 提取列名后修复
-- 前端 `runSaved()` 保留 `useDemo` 状态：点击已保存真实连接时仍走演示路径，`checkResult` 不清空，`开始追踪` 按钮被 `blocking` 禁用 → 改 `useDemo: false` 后修复
-
-## 已存连接同名覆盖（2026-08-23）
-- `ConnectPage.doConnect` 每次 `newId()` → `upsertConnection` 以 id 为键 → `findIndex` 永远 -1 → 永远 `unshift`，
-  同名连接反复堆积成多条。
-- 修复：保存前先按 `name` 在 `saved` 里查找已存条目的 `id`，找到就复用；未找到才 `newId()`。
-  `upsertConnection` 即可正确命中并覆盖。
-- 验证：脚本模拟 3 次保存（同名 2 次 + 异名 1 次）→ 最终 count=2、uniqueIds=2，覆盖行为正确。
-- 修改：`frontend/src/pages/ConnectPage.tsx`（`doConnect` 内新增 `connName`/`existingId` 两行 + 注释）。
-
-## 本机环境
-- MySQL 8.0.36：`log_bin=1`、`binlog_format=ROW`、`row_image=FULL`、`binlog_checksum=CRC32`、
-  `binlog_row_metadata=MINIMAL`（krowinski 回退 information_schema 取列名）。
-- 用户实际改的是 `test.order`；Vite dev 5173；Node v24.10.0；tpc 在
-  `/d/git/php/tpc_v1113_windows_x86_64/tpc`（PE32+ x86-64, php 8.4）——有依赖障碍，故未走 WASM 重建。
-
-## 原生 agent/ 路径（2026-08-24，TypePHP 编译目标）
-
-### AgentHandler::handleDump 契约（agent/src/AgentHandler.php:168-314）
-- spawn 脚本 `__DIR__.'/../bin/mysqlbinlog_dump.php`；CLI：`--host --port --user --file <binlogFile> --pos <pos>` + 条件 `--start-ts <sec>`(startMs/1000>0) + `--end-ts <sec>`(endMs/1000>0)。密码经 ENV `DMS_MYSQL_PASSWORD`；cwd=`agent/`；stdout(1)/stderr(2) pipe w。
-- stdout 逐行 JSON：`onDumpReadable` 仅转发 `type==='change'` 行 → `binlog-change` 帧（字段 kind,schema,table,columns,primaryKeys,before,after,xid,timestamp,binlogFile,binlogPos）；其他 type（如 heartbeat）忽略。
-- exit 0 → `binlog-end{exitCode:0}`；非 0 → error code INTERNAL_ERROR「binlog 解析进程异常退出 code=N」+ stderr 尾部 300 字。
-- `dump-started` 帧显示的是 AgentHandler 在 spawn 前从 MetaGatherer 取的**当前尾巴位置**（mysql-bin.000005/1365），**非**实际起点；实际起点由 worker 内部 `probeStartFile` 决定，看 `[dump-err]` 日志。
-
-### mysqlbinlog CLI 在本机不可行
-- 本机 `mysqlbinlog`（MySQL 9.4.0）已移除 `mysql_native_password` 客户端插件 → 连远程 5.7 报 `Authentication plugin 'mysql_native_password' cannot be loaded: dlopen(.../mysql_native_password.so... no such file)` → worker code=1、AgentHandler 报 code 1099。
-- 故将 `agent/bin/mysqlbinlog_dump.php` 整体改为纯 PHP `krowinski/php-mysql-replication`（与 agent-workerman 同源），不再依赖任何本地二进制，TypePHP 打包后无外部依赖。
-
-### krowinski 在 agent/vendor 已可直接 autoload
-- `php -r "require 'vendor/autoload.php'; var_dump(class_exists('MySQLReplication\\MySQLReplicationFactory'));"` → `bool(true)`；`agent/composer.json` require 仅 php/ext-pdo*/ext-sockets，但 vendor 内已装且 autoload 含 krowinski，**无需改 composer.json**。
-- 目标 MySQL 5.7 用 mysql_native_password，krowinski 自实现 socket 支持；仅 MySQL 8.4+/9（仅 caching_sha2）曾握手失败（Got packets out of order），与本目标无关。
-
-### 历史窗起点定位（worker 内，复刻 agent-workerman）
-- `SHOW BINARY LOGS`（PDO）→ `array_reverse` 从新到旧 → 逐文件 krowinski 从 pos 4 取首个行事件 ts → 首个 `ts < startTs` 的文件为起点（pos 4 起，窗口前行被 start-ts 过滤，无遗漏）；全部文件首事件 ≥ startTs → 回退最旧文件。
-- 主 `MySQLReplicationFactory` 经 ROTATE 续读后续文件；`onXID` 缓冲赋 xid 并作时间窗过滤与越界 `exit(0)`（加 `timestamp>0` 守卫防 ts=0 误杀）；`onHeartbeat` 用本地墙钟 `time()>$endTs+5` 兜底退出。
-
-## 代理可达性状态模型（2026-08-26 下午场）
-- 前端不应让 ping 结果污染 `wsStatus`；应独立字段 `agentReachable: boolean | null`，由 `deriveTopStatus` 统一定义优先级：demo > WS connected/wsMeta > agentReachable=true(代理在线) > agentReachable=false(代理异常) > WS error > idle。
-- 四页面（ConnectPage/TracePage/RollbackPage/ResultPage）TopBar `status` 统一改为 `deriveTopStatus(state)`。
-
-## MultiSelect 组件设计约定（2026-08-26 下午场）
-- `options` 支持 `string | {value,label}` 两种格式（`optValue/optLabel` 统一取值，key 用 value 保证唯一）。
-- `label` prop：传入时渲染 `.field > label + div.multi-select`，与 Select 视觉对齐；面板 `position:absolute` 定位不受外层 `.field` 影响。
-- `id` prop：传到根 DOM，便于 CSS 单独定位（如 ResultPage 两个筛选器 `#table-filter-ms` / `#column-filter-ms`）。
-- `exclusiveOption` prop：互斥选项（如「全部」）的互斥逻辑**必须在组件内部 toggle 处理**，不能在外部 onChange 里根据"是否含互斥值"再强制回退——否则会与内部 toggle 新增的值相互抵消（表现为「点不动」具体表）。
-- `.multi-select-trigger` 高度 36px（与原生 `.select` 一致）；`.filter-bar .multi-select-trigger` 覆写 26px（与 `.select-sm` 一致）。
-
-## dump 卡顿根因（2026-08-26 下午场）
-- `agent-workerman/bin/krowinski_dump.php` 心跳 `withHeartbeatPeriod(5)` 决定空窗口兜底退出的最快速度——即使无新事件也要等 ~5s 才发心跳供 `time()>$endTs+5` 判断退出。
-- 修复：`withHeartbeatPeriod(5)`→`2`、兜底 `endTs+5`→`endTs+2`。注意两值需匹配。
-
-## 前端回滚事务开关（2026-08-26 下午场）
-- `rollback-gen.generateRollback(changes, independentTx=false)`：`independentTx=false`（默认，共享事务）→ 所有变更只包一次 `START TRANSACTION;`(开头) / `COMMIT;`(结尾)；`true`（独立回滚）→ 每个 xid 组各自包裹。stats.transactions 同步（共享=1 / 独立=组数）。
-- `parser-client.generateRollbackScript` + `parser.worker.ts` 透传 `independentTx`。
-- RollbackPage 工具栏加 checkbox「独立回滚（每条变更单独事务）」，默认不勾；切换重新生成（useEffect 依赖含 independentTx）。
-
-## 前端验证基线（2026-08-26 下午场）
-- `npx vitest run`：28 passed / 0 fail；`read_lints` 0 错误（本轮所有改动累计）。
+## 编译兼容修复记录（agent/src，均已 dry 通过）
+1. Server.php: `$id` 一变量两类型（int 赋值→foreach key Var）→ 循环键改名 `$cid`
+2. AgentHandler.php: 属性默认值引用他类常量 `= AgentConstants::CONNECT_TIMEOUT_MS` → 移到构造器
+3. ClientConn.php: respond() 3参被传4参（/ping 传 content-type）→ 增加第4参 `string $contentType`
+4. Router.php: `$_SERVER['REQUEST_TIME_FLOAT']` bin 模式不可靠 → Server::$startedAt 静态时间戳
+5. tpc v0.9.5 链接的运行时 = PHP 8.5.11 ZTS embed SAPI

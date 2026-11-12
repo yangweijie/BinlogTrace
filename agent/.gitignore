@@ -1,4 +1,12 @@
 /build/
-/binlog_agent.exe
-/binlog_agent.exp
-/binlog_agent.lib
+/dist/
+/vendor/
+/release/
+/binlog-agent
+/binlog-agent.exe
+/binlog-agent.exp
+/binlog-agent.lib
+/bin/agent
+/tp-smoke*
+/tp-probe*
+/.env

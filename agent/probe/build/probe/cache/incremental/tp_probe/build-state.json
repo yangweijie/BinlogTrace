@@ -1,0 +1,69 @@
+{
+    "schema": 1,
+    "generatorFingerprint": "1f42fd611770d60a6f8a2339dead530f9d63f678e3d946609c05fd1b2bd79541",
+    "files": {
+        "D:\\git\\php\\typephp_dms\\agent\\probe\\main.php": {
+            "hash": "7d746709bd3aca32170b7965c9b7097d6934eef6e895e2df34f61fd2d652e654",
+            "dependencies": [],
+            "symbolsDeclared": [
+                "function:main",
+                "function:tryread",
+                "function:tryrequire",
+                "global:GLOBALS",
+                "global:_SERVER",
+                "global:probeDiskGlobal",
+                "native-function:main",
+                "native-function:tryread",
+                "native-function:tryrequire"
+            ],
+            "symbolsUsed": [
+                "class:probedisk\\plain",
+                "class:throwable",
+                "function:tryread",
+                "function:tryrequire",
+                "global:_SERVER"
+            ],
+            "emitsTranslationUnit": true,
+            "header": "D:\\git\\php\\typephp_dms\\agent\\probe\\build\\probe/include/php_tp_probe_main_3cb769abc8_decl.h",
+            "cpp": "D:\\git\\php\\typephp_dms\\agent\\probe\\build\\probe\\\\main.cc",
+            "splitTranslationUnits": [],
+            "statistics": {
+                "classes": {
+                    "Throwable": 1
+                },
+                "types": {
+                    "php::Bool": 10,
+                    "php::Int": 7,
+                    "php::Str": 7,
+                    "php::Var": 1,
+                    "php::Array": 1,
+                    "php::Object": 1
+                },
+                "functions": {
+                    "is_file": 1,
+                    "file_get_contents": 1,
+                    "strlen": 1,
+                    "dirname": 1,
+                    "realpath": 1,
+                    "tryrequire": 1,
+                    "class_exists": 2,
+                    "tryread": 2
+                },
+                "direct-functions": {
+                    "is_file": 1,
+                    "class_exists": 2
+                },
+                "runtime-functions": {
+                    "file_get_contents": 1,
+                    "strlen": 1,
+                    "dirname": 1,
+                    "realpath": 1
+                }
+            },
+            "globals": {
+                "_SERVER": "php::Array"
+            },
+            "nativeStaticInitializers": []
+        }
+    }
+}

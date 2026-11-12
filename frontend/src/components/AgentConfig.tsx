@@ -3,7 +3,11 @@ import { useState, useCallback, useEffect } from 'react';
 import { Settings, Loader2 } from 'lucide-react';
 
 const STORAGE_KEY = 'dms-agent-url';
-const DEFAULT_URL = 'http://127.0.0.1:8080';
+/** 默认同源：前端由 agent 二进制伺服（端口跟随 .env）；file:// 等异常源回退 8080 */
+const DEFAULT_URL =
+  typeof window !== 'undefined' && window.location.origin.startsWith('http')
+    ? window.location.origin
+    : 'http://127.0.0.1:8080';
 
 /** 从 localStorage 读取持久化的代理地址 */
 export function getStoredAgentUrl(): string {
