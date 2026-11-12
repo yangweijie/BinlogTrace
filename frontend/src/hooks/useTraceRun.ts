@@ -284,10 +284,13 @@ export function useTraceRun(demoMode: boolean) {
     unsubRef.current = unsub;
     return () => {
       unsub();
-      // #2/#4 修复：组件卸载且仍在采集时，真正关闭底层 SSE 流，避免流泄漏
+      // 停止底层 SSE 流即可，切勿 close()：本 effect 的清理在 collecting 每次
+      // 变化（取消拉取/重新拉取/完成）时都会执行，close() 会 POST /close 销毁会话，
+      // 导致"取消后重拉"报"会话不存在"。stopDump 只停流、保留会话，真正的会话销毁
+      // 由清连接（clearSession / 返回连接页）负责。
       if (!done) {
         const s = getSession();
-        s?.close();
+        s?.stopDump();
       }
       if (unsubRef.current === unsub) unsubRef.current = null;
     };
