@@ -16,6 +16,8 @@ export interface TraceAgent {
   connect(opts: { host: string; port: number; user: string; password: string; database?: string }): Promise<ConnectedPayload>;
   startDump(payload: StartDumpOptions): void;
   query<T = unknown>(sql: string, database?: string): Promise<T>;
+  /** 仅停当前 dump 流（保留会话/连接），可再次 startDump */
+  stopDump(): void;
   close(): void;
 }
 
@@ -94,6 +96,10 @@ export class TraceSession {
     this.ended = false;
     this.lastError = null;
     this.agent.startDump(payload);
+  }
+
+  stopDump(): void {
+    this.agent.stopDump();
   }
 
   close(): void {

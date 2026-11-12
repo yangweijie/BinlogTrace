@@ -98,6 +98,11 @@ export class MockAgent {
     return { columns: [], rows: [], affectedRows: 0 } as T;
   }
 
+  /** 演示模式：停当前流即可（无真实后端会话） */
+  stopDump(): void {
+    this.close();
+  }
+
   close(): void {
     this.timers.forEach((t) => window.clearTimeout(t));
     this.timers = [];

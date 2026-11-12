@@ -192,12 +192,12 @@ export function useTraceRun(demoMode: boolean) {
     setPulledCount(0);
   };
 
-  /** 取消拉取：停止采集并清理订阅（不跳转结果页） */
+  /** 取消拉取：仅停当前 dump 流（保留会话，可改时间后重新拉取，不重新连接） */
   const cancel = (): void => {
     cancelledRef.current = true;
     const session = getSession();
     if (session) {
-      session.close();
+      session.stopDump();
     }
     unsubRef.current?.();
     unsubRef.current = null;

@@ -136,6 +136,16 @@ export class WsClient {
     return (data.payload ?? {}) as T;
   }
 
+  /** 仅停止当前 dump 流：中止 SSE fetch（不发 /close）。
+   *  后端会话（MySQL 连接 + token）保留——SSE 断开后服务端会自动 stopDump 清理子进程，
+   *  之后可用同一 session 重新 startDump。用于"取消拉取"（区别于 close 断开整个连接）。 */
+  stopDump(): void {
+    this.abort?.abort();
+    this.abort = null;
+    // 复位 handler 内的流状态，避免旧订阅继续消费
+    this.handlers.onClose?.();
+  }
+
   /** 关闭会话：中止 SSE 流并 POST /close（不阻塞） */
   close(): void {
     // 真正中断仍在进行中的 fetch/SSE 流（#2 修复：此前流无法被中止）
