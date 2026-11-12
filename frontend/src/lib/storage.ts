@@ -47,10 +47,23 @@ export function removeConnection(id: string): SavedConnection[] {
   return list;
 }
 
-export function loadTraceConfig(): TraceConfig | null {
+/** 追踪配置按「连接」区分存储：切到另一台 MySQL 实例（不同 host:port）时
+ *  不会串用上一个实例残留的库名/表名（例如本地 test 库 → RDS 无此库）。 */
+function traceKey(host: string, port: string | number): string {
+  return `${KEY_TRACE}:${host}:${port}`;
+}
+
+export function loadTraceConfig(conn?: { host: string; port: number } | null): TraceConfig | null {
+  if (conn && conn.host) {
+    return read<TraceConfig | null>(traceKey(conn.host, conn.port), null);
+  }
   return read<TraceConfig | null>(KEY_TRACE, null);
 }
 
-export function saveTraceConfig(config: TraceConfig): void {
-  write(KEY_TRACE, config);
+export function saveTraceConfig(conn: { host: string; port: number } | null, config: TraceConfig): void {
+  if (conn && conn.host) {
+    write(traceKey(conn.host, conn.port), config);
+  } else {
+    write(KEY_TRACE, config);
+  }
 }

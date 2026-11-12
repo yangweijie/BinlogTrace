@@ -34,7 +34,7 @@ export default function TracePage() {
   const state = useAppState();
   const { connection, wsMeta, checkResult, demoMode, agentUrl } = state;
   useAgentPing();
-  const persisted = useRefLoad();
+  const persisted = useRefLoad(connection);
   const [db, setDb] = useState(persisted?.db ?? '');
   const [table, setTable] = useState<string[]>(() => {
     const saved = persisted?.table;
@@ -70,15 +70,22 @@ export default function TracePage() {
     if (end === '') setEnd(hoursAgo(0));
   }, [end]);
 
+  // 库/表级联：下拉就绪后校验 db 是否属于当前实例；stale（上一实例残留/该实例无此库）则清空，
+  // 避免对不存在的库发起 INFORMATION_SCHEMA 查询而报"数据库 xxx 不存在"。
   useEffect(() => {
-    if (db) void schema.loadTables(db);
+    if (demoMode || !db || schema.dbOptions.length === 0) return;
+    if (!schema.dbOptions.some((o) => o.value === db)) {
+      setDb('');
+      setTable([ALL_TABLE]);
+      return;
+    }
+    void schema.loadTables(db);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [db, schema.dbOptions, demoMode]);
 
   const onDbChange = (value: string): void => {
     setDb(value);
     setTable([ALL_TABLE]);
-    if (value) void schema.loadTables(value);
   };
 
   const toggleType = (t: ChangeType): void => {
@@ -118,7 +125,7 @@ export default function TracePage() {
     setTypeError(types.length === 0 ? '请至少勾选一种追踪类型。' : '');
     if (types.length === 0 || !validateRange() || !db) return;
     const cfg: TraceConfig = { db, table, start, end, types };
-    saveTraceConfig(cfg);
+    saveTraceConfig(connection, cfg);
     dispatch({ type: 'setTraceConfig', config: cfg });
     if (!wsMeta) {
       dispatch({ type: 'setStatus', status: 'error', error: '连接元数据缺失，请返回连接页重新连接。' });
@@ -235,7 +242,7 @@ export default function TracePage() {
   );
 }
 
-function useRefLoad() {
-  const [state] = useState(() => loadTraceConfig());
+function useRefLoad(conn: { host: string; port: number } | null) {
+  const [state] = useState(() => loadTraceConfig(conn));
   return state;
 }
