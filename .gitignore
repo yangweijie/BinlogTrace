@@ -26,6 +26,7 @@
 
 # 打包输出
 /release/
+/release-mac/
 
 # 探针/构建中间产物
 /probe/build/

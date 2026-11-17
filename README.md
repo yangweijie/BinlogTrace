@@ -1,6 +1,6 @@
 # DMS Agent — TypePHP 单包 CLI 应用（自起 Web 服务）
 
-用 TypePHP 编译成 **Windows 原生二进制** 的 MySQL binlog 数据追踪代理（参考 webman_dms 重实现）。
+用 TypePHP 编译成 **Windows / macOS 原生二进制** 的 MySQL binlog 数据追踪代理（参考 webman_dms 重实现）。
 运行二进制即启动自带的 HTTP 服务：同端口伺服 **前端 SPA** 与 **API**；关闭二进制，Web 服务随之退出；
 监听端口由**二进制同级 `.env`** 指定，前端（同源默认地址）自动跟随。
 
@@ -104,6 +104,75 @@ cmd /c "package.bat <abs-path>\release\dms-agent"
 
 > 注意：**不要在项目根直接运行 tpc**——根目录的 `php.ini`（为编译产物准备的）会被
 > tpc 自身的 PHP 从 cwd 加载并破坏其模块启动；`tpc-build.bat` 已切到无 php.ini 的临时目录执行。
+
+## 在 macOS 上构建（Apple Silicon / arm64）
+
+Windows 的 `tpc-build.bat` / `package.bat` 在 macOS 不适用，用 `project.macos.yml` + `build-macos.sh`：
+
+```bash
+brew install gmp mpfr oniguruma             # 静态 PHPX / mbstring 链接的动态库
+cd frontend && npm install && npm run build && cd ..
+composer install
+./build-macos.sh                           # → ./binlog-agent（Mach-O arm64，约 12MB）
+```
+
+要点：
+
+- 编译器用 TypePHP **v0.10.0 源码版**（可用 `TPC=/path/to/tpc.php` 覆盖）。v0.9.5 的
+  `PhpBuilderSource` 会把 `core` 伪扩展拿去查 PECL 而 404，php-builder 阶段直接中止。
+- 宿主 Homebrew PHP 只有 cli SAPI（无 libphp），`php-builder` 从 php-src 现编一份静态 embed
+  运行时（缓存 `~/.typephp`，二次构建复用）。扩展在 `project.macos.yml` 显式列全：
+  `pdo / pdo_mysql / sockets / bcmath / filter / mbstring / ctype`——Windows 靠 php.ini 动态加载
+  `.dll`，macOS 是静态编进 `libphp.a`。
+- 构建脚本导出 `CPATH` / `CPLUS_INCLUDE_PATH` / `LIBRARY_PATH` 指向 `/opt/homebrew`：
+  cmake 子构建编静态 PHPX 时不会继承 tpc 的 Homebrew 路径，否则 `gmpxx.h` / `mpfr.h` 找不到。
+- `php.ini` 已换成 macOS 版（原 Windows 版备份为 `php.ini.windows`）；产物以自身所在目录为基准
+  定位 `.env` / `dist/` / `vendor/` / `bin/dump_worker.php`。
+- 产物链接 `/opt/homebrew/opt/{gmp,gmpxx,mpfr,oniguruma}` 的 dylib。分发到未装这些库的 Mac
+  时用 `package-macos.sh` 组自包含包（dylib 随包，见下节）。
+
+运行方式与 Windows 一致：在二进制同目录 `.env` 写 `PORT=9721`，或直接
+`./binlog-agent serve --port 9721`，浏览器打开 `http://127.0.0.1:9721/`。
+
+macOS 实测（2026-11-17，arm64 / PHP 8.5.11 embed）：`/ping` 200（sapi=embed）、前端静态伺服、
+路径遍历 400、`/connect` 规范错误帧且 `pdo_mysql` 可用、`__dump_worker` 自我拉起并加载
+vendor/krowinski、关闭进程后端口立即释放。
+
+### 历史窗口（startMs>0）排障
+
+拉「最近 N 小时」时，起点探测会把起点定位到 binlog 文件头（pos=4）以保证不漏，
+worker 需要顺序扫过该文件里的历史事件。binlog 文件较大时注意：
+
+- worker 内已 `memory_limit=1024M`（macOS 的 `php.ini` 也设了 1G）。默认 128M 会在
+  krowinski 的 `RowEvent` 解析途中耗尽 → fatal → 子进程退出 255，前端只见心跳、零变更。
+- 窗口起点之前的历史行在 `collectRow` 里直接丢弃，不进待输出缓冲，内存不再随历史量增长。
+- 子进程异常由函数边界兜底捕获（退出码 2 + 可读原因），原因随 SSE `error` 帧回传，
+  不再只有 `code=255`。注意 embed 调用链上 `set_exception_handler` 不生效，必须在 PHP
+  函数内 try/catch。
+- 优化前大文件首次拉取会有几十秒只有心跳（顺序扫描历史段），两阶段定位（下条）已解决。
+- **两阶段定位（探针 v2，2026-11-18）**：拉历史窗口时 worker 先用
+  `SHOW BINLOG EVENTS LIMIT n,1` 二分找「≈ P_now − margin」的事件边界（margin 256KB 起跳、
+  未覆盖时 expand 逐级扩大），再 krowinski 轻量读（只订 XID/ROTATE、行事件不解析、内存平稳）
+  跳到窗口内首个提交点，阶段 2 从该事务起点读、跳过历史段；未命中自动回退「文件头全扫」。
+  实测 37MB 历史文件 + 24h 窗口：worker 总耗时 45-52s → **~14s**，事件零遗漏、大文件不再 OOM；
+  SSE 端到端（POST /connect → POST /dump，带 startMs）：**首条 `binlog-change` 帧 8.7s 到达**
+  （旧逻辑 45-52s，其间只见心跳），176/176 条、心跳 0 次、`binlog-end` 13.8s。
+
+### 自包含发行包（package-macos.sh）
+
+```bash
+./package-macos.sh                # → release-mac/dms-agent（约 19MB，含 lib/ 内 4 个 dylib）
+zip -r dms-agent-macos.zip release-mac/dms-agent
+```
+
+- 把 4 个 Homebrew dylib 拷进包内 `lib/`，install_name 全部改写为 `@rpath`，主二进制加
+  `@loader_path/lib` rpath 并清掉构建机绝对 rpath。**目标机只要是 arm64 Mac 即可运行，
+  无需 Homebrew / PHP / 编译器**（脚本自带 /ping 验收；另经 `env -i` 干净环境验证：
+  /ping + /connect 的 pdo_mysql 链路正常）。
+- 包布局与 Windows 包一致（二进制 + php.ini + dist/ + vendor/ + bin/dump_worker.php + .env），
+  解压即用。
+- 脚本 `DYLIBS` 列表里的文件名是 ABI 版本号（gmp 6.3 / mpfr 4.2 / oniguruma 6.2）；
+  brew 升级导致 soversion 变化时需同步更新。
 
 ## 已验证 / 待验证
 

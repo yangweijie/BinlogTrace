@@ -28,6 +28,8 @@ final class Server
     private array $errFds = [];
     /** @var array<int, int> stdout fdKey -> 对应 stderr fdKey（dump 结束时一并清理） */
     private array $errKeys = [];
+    /** @var array<int, AgentHandler> stderr fd -> handler（错误诊断回传用） */
+    private array $errOwners = [];
     private int $heartbeatSec = 15;
     private float $lastHeartbeat = 0;
     /** 进程启动时间戳（/ping 的 uptime 用；bin 模式下 $_SERVER 不可靠） */
@@ -149,6 +151,10 @@ final class Server
                 $chunk = @fread($epipe, 8192);
                 if ($chunk !== '' && $chunk !== false) {
                     error_log('agent[dump-err]: ' . trim($chunk));
+                    $owner = $this->errOwners[$efd] ?? null;
+                    if ($owner instanceof AgentHandler) {
+                        $owner->appendDumpErr($chunk);
+                    }
                 }
             }
         }
@@ -165,7 +171,7 @@ final class Server
                         // 同时清理 stderr 管道（finishDump 已 fclose，否则会残留在 errFds 中导致 stream_select 崩溃）
                         $errKey = $this->errKeys[$fdKey] ?? null;
                         if ($errKey !== null) {
-                            unset($this->errFds[$errKey], $this->errKeys[$fdKey]);
+                            unset($this->errFds[$errKey], $this->errKeys[$fdKey], $this->errOwners[$errKey]);
                         }
                         foreach ($this->clients as $cid => $cc) {
                             if ($cc->owner === $handler && $cc->keepAlive()) {
@@ -209,7 +215,7 @@ final class Server
                 unset($this->pipeFds[$fdKey], $this->dumpPipes[$fdKey]);
                 $errKey = $this->errKeys[$fdKey] ?? null;
                 if ($errKey !== null) {
-                    unset($this->errFds[$errKey], $this->errKeys[$fdKey]);
+                    unset($this->errFds[$errKey], $this->errKeys[$fdKey], $this->errOwners[$errKey]);
                 }
             }
         }
@@ -232,6 +238,7 @@ final class Server
             $errKey = (int) $err;
             $this->errFds[$errKey] = $err;
             $this->errKeys[$fdKey] = $errKey;
+            $this->errOwners[$errKey] = $handler;
         }
     }
 

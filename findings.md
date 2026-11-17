@@ -53,3 +53,34 @@
 3. ClientConn.php: respond() 3参被传4参（/ping 传 content-type）→ 增加第4参 `string $contentType`
 4. Router.php: `$_SERVER['REQUEST_TIME_FLOAT']` bin 模式不可靠 → Server::$startedAt 静态时间戳
 5. tpc v0.9.5 链接的运行时 = PHP 8.5.11 ZTS embed SAPI
+
+## macOS 移植（2026-11-17 实测，arm64）
+- **工具链**：本机无 Windows 版 tpc；用 **tpc v0.10.0 源码版**（`/Volumes/data/git/php/typephp-compiler/bin/tpc.php`，宿主 PHP 8.5.7 NTS Homebrew）。
+- **core 伪扩展 404 缺陷**：v0.9.5 的 PhpBuilderSource 未跳过 core → PECL 404 中止（typephp-qt skill §2）；v0.10.0 已修（`SapiExtensionConfiguration::withoutCoreExtensions`），无需 patch。
+- **私有运行时（php-builder）**：宿主 Homebrew PHP 只有 cli SAPI（无 libphp），tpc 从 php-src 现编静态 embed 运行时，缓存 `~/.typephp`（PHP 8.5.11 NTS，zts off 与宿主 NTS 匹配）。扩展在 project.macos.yml 的 php-builder 段显式列全：pdo / pdo_mysql / sockets / bcmath / filter / mbstring / ctype（`--disable-all` 下必须显式；依据 composer.lock 的 ext 声明 + krowinski Config 的 filter_var 实测）。
+- **YAML php-builder 段**：仅当命令行**不传** `--php-builder` 时生效；传空值会被 `{}` 覆盖（Translator.php 参数预处理）→ build-macos.sh 不传该参数。
+- **CPATH 坑**：静态 PHPX 由 cmake 子构建编译，**不继承** tpc 的 Homebrew include 路径 → big_int.cc/big_float.cc 缺 gmpxx.h/mpfr.h。build-macos.sh 导出 `CPATH/CPLUS_INCLUDE_PATH/LIBRARY_PATH=/opt/homebrew`（gmp 6.3.0 / mpfr 4.2.2 已装）。
+- **产物**：binlog-agent（Mach-O arm64 ≈12MB），动态依赖 `/opt/homebrew/opt/{gmp,gmpxx,mpfr,oniguruma}` 的 dylib（otool -L 实测）；链接参数 tpc 自动加 -lgmp -lgmpxx -lmpfr。
+- **php.ini**：mac 版（Windows 版备份 php.ini.windows）；embed SAPI 读二进制同目录 php.ini（/connect 诊断 php_ini 字段确认指向项目根）。运行时后加 memory_limit=1G（见下节）。
+- **AOT 兼容**：14 个源文件在 v0.10.0 下 dry + 全量编译均通过，未命中新的类型推断限制。
+- **自包含发行包（package-macos.sh，2026-11-18）**：4 个 Homebrew dylib 拷进包内 lib/，install_name 全部 @rpath 化 + 主二进制 `@loader_path/lib` rpath（并清构建机绝对 rpath）；目标机无需 Homebrew/PHP，`env -i` 干净环境验收 /ping + /connect（pdo_mysql）通过。坑：otool -L 行首是 **TAB**，`grep -o '[^ ]*'` 取路径会把 TAB 带进 `install_name_tool -change` 导致静默无效（rc=0 但不改写），需整行 trim 后匹配。
+
+## dump 24h 窗口排障（2026-11-17，真实库 103.115.42.75 / MySQL 5.7.43-log）
+- **库事实**（只读查询）：ROW/FULL、log_bin=1、server_id=1、log_bin_use_v1_row_events=0、ALL PRIVILEGES、6 个 binlog 文件，当前 mysql-bin.000006 ≈37MB（8 月起写至今）；`SHOW BINARY LOG STATUS` 在 5.7 不可用（MetaGatherer 已有 `SHOW MASTER STATUS` 回退，生效）。
+- **症状**：前端拉「最近 24h」只见 15s 心跳（binlogPos 恒 null），约 98s 后 `code=1099 binlog 解析进程异常退出 code=255`，错误帧无原因。
+- **根因**：Mac 私有 embed 运行时默认 **memory_limit=128M**；24h 窗口起点探测把起点定到文件头 pos=4（不漏设计），krowinski 顺序解析 3 个月历史，`RowEvent::makeUpdateRowsDTO → getColumnData` 处 `Allowed memory size of 134217728 bytes exhausted`（RowEvent.php:493）→ fatal → 255。
+- **stderr 丢失原因**：Server 事件循环 3a 把子进程 stderr 读走只 error_log，finishDump 的 stream_get_contents（非阻塞）读到空 → 错误帧只剩退出码。
+- **修复**（bin/dump_worker.php 为磁盘普通 PHP，改后无需重编译；后两条需重编译）：
+  1. worker 内 `ini_set('memory_limit','1024M')`（不依赖部署 php.ini，Windows 包同样受益）
+  2. `collectRow` 早丢弃 timestamp < startTs 的历史行（不进 pending，内存/GC 压力大降，扫描提速）
+  3. `dms_dump_worker_main` 包 try/catch 调 `dms_dump_worker_run`（**embed AOT 调用链上 set_exception_handler 不生效**，实测仍 255）→ 退出码 2 + 可读 stderr
+  4. `AgentHandler.dumpErrBuf` 累积 stderr + `finishDump` 切阻塞读管道残余（竞态）→ error 帧带原因；`Server.errOwners` 维护 stderr fd → handler 映射
+  5. mac php.ini 加 memory_limit=1G 兜底
+- **实测**：错误场景 error 帧 `code=2: dump_worker: 未捕获异常: Could not find first log file name... @ BinLogSocketConnect.php:130`；24h 窗口 52s → 176 条 binlog-change（30 insert + 146 update）+ binlog-end，0 fatal。
+- **探针 v2 两阶段定位（2026-11-18，已实现）**：拉历史窗口不再顺序扫描解析整段历史：
+  ① `P_now` = SHOW BINARY LOG STATUS（8.0）/ SHOW MASTER STATUS（5.7，两条分开 try，防 5.7 语法异常吞掉回退）；
+  ② `SHOW BINLOG EVENTS LIMIT n,1` 指数+二分找「≈ P_now − margin」事件边界（~0.5s/次，服务端解析快）；margin 256KB 起跳、2MB/16MB/整文件逐级扩大；
+  ③ krowinski 轻读（只订 XID/ROTATE，行事件被 ignoreEvent 跳过不解析、内存平稳）跳到「第一个提交 ts >= startTs」，返回其事务起点（= 上一个 XID 的 next-position）；
+  命中范围为内首个 XID → expand（该事务可能始于 fromPos 之前，防漏事件）；未命中/超时 → 回退旧文件选择 + 全扫（保正确）。
+  实测 37MB + 24h 窗口：45-52s → **14s**，176 条事件零遗漏、大文件不再 OOM。
+- **MySQL 5.7 探针相关事实**：`SHOW BINLOG EVENTS` **无时间戳列**；Query 事件 Info **无 `SET TIMESTAMP=` 前缀**（只有 `BEGIN`/语句本身）；`FROM <pos>` 需精确事件边界（否则 error 1220）；`LIMIT offset,count` 可用；37MB 文件事件数 ~20 万。时间戳只能从 COM_BINLOG_DUMP 事件头取（krowinski `EventInfo->timestamp`）。→ v1 探针（SHOW 分页找 `SET TIMESTAMP`）因此注定不命中，已废弃。

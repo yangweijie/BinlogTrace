@@ -194,8 +194,234 @@ function dms_probe_one(string $host, int $port, string $user, string $password, 
     return $probe->verdict === 'pick' ? 'pick' : 'older';
 }
 
+/** 取 binlog 文件第 N 个事件（0 起）的 Pos（事件边界）；N ≥ 总事件数时返回 '' */
+function dms_show_event_pos(\PDO $pdo, string $file, int $offset): string
+{
+    $row = $pdo->query("SHOW BINLOG EVENTS IN '" . $file . "' LIMIT " . $offset . ', 1')->fetch(PDO::FETCH_ASSOC);
+    return is_array($row) ? (string) ($row['Pos'] ?? '') : '';
+}
+
+/**
+ * 指数搜索 + 二分：找第一个 Pos >= $targetByte 的事件边界（SHOW BINLOG EVENTS 每次 ~0.4-0.6s）。
+ * @return string 边界 Pos（'' = 查询失败）
+ */
+function dms_binlog_boundary_near(\PDO $pdo, string $file, int $targetByte, float $deadline): string
+{
+    try {
+        // 指数搜索上界：hi 处事件 Pos >= target，或 hi 越过 EOF
+        $hi = 0;
+        $step = 100000;
+        while (microtime(true) < $deadline - 8) {
+            $pos = dms_show_event_pos($pdo, $file, $hi);
+            if ($pos === '') {
+                break; // hi 已越过 EOF（上界 = 最后一个事件）
+            }
+            if ((int) $pos >= $targetByte) {
+                break; // hi 已是上界
+            }
+            $hi += $step;
+            $step *= 2;
+        }
+        // 二分：[0, hi] 内第一个 Pos >= targetByte
+        $lo = 0;
+        $up = $hi;
+        while ($lo < $up && microtime(true) < $deadline - 3) {
+            $mid = intdiv($lo + $up, 2);
+            $mpos = dms_show_event_pos($pdo, $file, $mid);
+            if ($mpos === '') {
+                $up = $mid; // mid 已超 EOF，答案在 [lo, mid)
+                continue;
+            }
+            if ((int) $mpos >= $targetByte) {
+                $up = $mid;
+            } else {
+                $lo = $mid + 1;
+            }
+        }
+        $bpos = dms_show_event_pos($pdo, $file, $lo);
+        return $bpos !== '' ? $bpos : '4';
+    } catch (\Throwable $e) {
+        return '';
+    }
+}
+
+/**
+ * krowinski 轻量读：从 $fromPos 起只订阅 XID/ROTATE（行事件被 ignoreEvent 跳过、不解析，
+ * 内存平稳），跳到「第一个提交 ts >= startTs 的 XID」，返回该事务的起点读位
+ * （= 上一个 XID 的 next-position）。
+ * @return array{0:string,1:string,2:bool,3:bool} [file, pos, hit, expand]；
+ *              expand=true 表示命中的是读入范围内首个 XID（其事务可能始于 $fromPos 之前，
+ *              调用方应扩大 margin 重试；$fromPos=4 时 expand 恒为 false）。
+ */
+function dms_krowinski_light_find(string $host, int $port, string $user, string $password, string $file, string $fromPos, int $startTs, int $timeoutSec = 25): array
+{
+    $probe = new class extends EventSubscribers {
+        public string $verdict = 'pending'; // pending | found
+        public int $startTs = 0;
+        public string $curFile = '';
+        public int $prevXidPos = 0;
+        public int $xidSeen = 0;
+        public int $fromPos = 0;
+        public string $foundFile = '';
+        public string $foundPos = '';
+
+        public function onXid(XidDTO $event): void
+        {
+            if ($this->verdict !== 'pending') {
+                return;
+            }
+            $this->xidSeen++;
+            $info = $event->getEventInfo();
+            if ($info->timestamp >= $this->startTs) {
+                // 本事务的行事件位于上个 XID 与当前 XID 之间；从上个 XID 边界读保证不漏。
+                $this->foundFile = $this->curFile;
+                $this->foundPos = $this->xidSeen === 1 ? (string) $this->fromPos : (string) $this->prevXidPos;
+                $this->verdict = 'found';
+            }
+            $this->prevXidPos = (int) $info->pos;
+        }
+
+        public function onRotate(RotateDTO $event): void
+        {
+            if ($event->nextBinlog !== '') {
+                $this->curFile = $event->nextBinlog;
+                $this->prevXidPos = 0; // 新文件从 4 开始
+            }
+        }
+    };
+    $probe->startTs = $startTs;
+    $probe->curFile = $file;
+    $probe->fromPos = (int) $fromPos;
+    // 首个 XID 命中时，其事务起点 = 读入起点 $fromPos（而非文件头 4）
+    $probe->prevXidPos = (int) $fromPos;
+
+    $factory = new MySQLReplicationFactory(
+        (new ConfigBuilder())
+            ->withUser($user)
+            ->withHost($host)
+            ->withPassword($password)
+            ->withPort($port)
+            ->withBinLogFileName($file)
+            ->withBinLogPosition($fromPos)
+            ->withHeartbeatPeriod(2) // 空闲时心跳到达，给 stop check 机会运行
+            ->withEventsOnly([
+                ConstEventType::XID_EVENT->value,
+                ConstEventType::ROTATE_EVENT->value,
+            ])
+            ->build()
+    );
+    $factory->registerSubscriber($probe);
+    $t0 = microtime(true);
+    try {
+        $factory->runWithStopCheck(static function () use ($probe, $t0, $timeoutSec): bool {
+            return $probe->verdict !== 'pending' || (microtime(true) - $t0) > $timeoutSec;
+        });
+    } catch (\Throwable $e) {
+        fwrite(STDERR, 'dump_worker: 探针轻读失败: ' . $e->getMessage() . "\n");
+        return [$file, '', false, false];
+    }
+    $hit = $probe->verdict === 'found';
+    // 首个 XID 命中（xidSeen==1 且 fromPos>4）：该事务可能始于 fromPos 之前 → 需扩大 margin；
+    // fromPos=4（整文件）时 4 即最早起点，无需扩大。
+    $expand = $hit && $probe->xidSeen === 1 && $probe->fromPos > 4;
+    return [$probe->foundFile, $probe->foundPos, $hit, $expand];
+}
+
+/**
+ * 提交点轻量探针 v2（两阶段定位·阶段 1）：
+ * ① PDO 二分（SHOW BINLOG EVENTS LIMIT n,1）找「≈ P_now - margin」的事件边界（不传行数据）
+ * ② krowinski 从该边界轻读（只订 XID/ROTATE，行事件不解析，内存平稳），
+ *    跳到「第一个提交 ts >= startTs 的事务」→ 返回其起点读位（阶段 2 从那里完整读，跳过历史段）。
+ * margin 逐级扩大（4MB → 32MB → 整文件）；hit=false（失败/窗口无提交点）→ 调用方回退「文件头全扫」。
+ */
+function dms_probe_window_pos(string $host, int $port, string $user, string $password, string $file, int $startTs, int $timeoutSec = 90): array
+{
+    // binlog 文件名白名单校验（防 SQL 拼接注入）
+    if (preg_match('/^[A-Za-z0-9_.-]+$/', $file) !== 1) {
+        return [$file, '', false];
+    }
+    try {
+        $pdo = new PDO(
+            "mysql:host={$host};port={$port};dbname=mysql",
+            $user,
+            $password,
+            [PDO::ATTR_TIMEOUT => 5, PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
+        );
+    } catch (\Throwable $e) {
+        fwrite(STDERR, 'dump_worker: 探针连接失败: ' . $e->getMessage() . "\n");
+        return [$file, '', false];
+    }
+    // 当前文件写入位置（8.0 用 SHOW BINARY LOG STATUS，5.7 回退 SHOW MASTER STATUS；
+    // 两条分开 try，避免 5.7 的语法异常吞掉回退）
+    $master = [];
+    try {
+        $master = $pdo->query('SHOW BINARY LOG STATUS')->fetch(PDO::FETCH_ASSOC) ?: [];
+    } catch (\Throwable $e) {
+        $master = [];
+    }
+    if ($master === []) {
+        try {
+            $master = $pdo->query('SHOW MASTER STATUS')->fetch(PDO::FETCH_ASSOC) ?: [];
+        } catch (\Throwable $e) {
+            fwrite(STDERR, 'dump_worker: 探针取当前位置失败: ' . $e->getMessage() . "\n");
+            return [$file, '', false];
+        }
+    }
+    $posNow = (int) ($master['Position'] ?? $master['position'] ?? 0);
+    if ($posNow < 8) {
+        return [$file, '', false];
+    }
+    $deadline = microtime(true) + $timeoutSec;
+    // margin 起跳尽量小（轻读网络量 = margin）；窗口数据更大时 expand 逐级重试：
+    // 256KB（多数场景窗口数据 < 此值，轻读 ~1s）→ 2MB → 16MB → 整文件
+    foreach ([262144, 2097152, 16777216, 0] as $margin) {
+        if (microtime(true) > $deadline) {
+            break;
+        }
+        $target = $margin > 0 ? max(4, $posNow - $margin) : 4;
+        $boundary = dms_binlog_boundary_near($pdo, $file, $target, $deadline);
+        if ($boundary === '') {
+            continue;
+        }
+        fwrite(STDERR, 'dump_worker: 探针 margin=' . ($margin > 0 ? (int) ($margin / 1024) . 'KB' : '整文件') . " 边界 pos={$boundary}（P_now={$posNow}）\n");
+        [$wFile, $wPos, $hit, $expand] = dms_krowinski_light_find($host, $port, $user, $password, $file, $boundary, $startTs);
+        if ($hit && (!$expand || $margin === 0)) {
+            return [$wFile, $wPos, true];
+        }
+        if ($margin === 0) {
+            break; // 整文件无窗口内提交点（窗口可能在更旧文件）→ 回退旧文件选择
+        }
+        // expand：命中的是读入范围内首个 XID，其事务可能始于 fromPos 之前 → 扩大 margin 重试
+        if ($expand) {
+            fwrite(STDERR, 'dump_worker: 探针 expand（窗口数据量 > 当前 margin，扩大重试）\n');
+        }
+    }
+    return [$file, '', false];
+}
+
+/**
+ * AOT 二进制的 main() 直接调用本函数，异常会穿过 C++ 调用栈；
+ * embed 链路上 set_exception_handler 不生效（仍是 fatal 255），
+ * 故在 PHP 函数边界内兜底捕获，保证 stderr 有可读原因、退出码明确。
+ */
 function dms_dump_worker_main(array $args): void
 {
+    try {
+        dms_dump_worker_run($args);
+    } catch (\Throwable $e) {
+        fwrite(STDERR, 'dump_worker: 未捕获异常: ' . $e->getMessage()
+            . ' @ ' . basename($e->getFile()) . ':' . $e->getLine() . "\n");
+        exit(2);
+    }
+}
+
+function dms_dump_worker_run(array $args): void
+{
+    // 历史窗口会把起点定位到 binlog 文件头（pos=4），顺序解析整段历史；
+    // krowinski 的 RowEvent DTO 会在默认 128M 上限处耗尽 → fatal → 子进程 255。
+    // 显式放宽，不依赖部署时的 php.ini（Windows 组包 / macOS 均生效）。
+    @ini_set('memory_limit', '1024M');
+
     // 开发模式（php bin/dump_worker.php 直跑）时补 autoload；embed 子命令路径已由
     // src/DumpWorker 预载，重复 require 对 composer autoload 无害
     if (!class_exists('MySQLReplication\\MySQLReplicationFactory')) {
@@ -224,18 +450,30 @@ function dms_dump_worker_main(array $args): void
         exit(2);
     }
 
-    // ---- 起点文件定位（仅 startTs>0）----
+    // ---- 窗口起点定位（仅 startTs>0）：两阶段，先 XID 轻量探针、未命中再回退全扫 ----
     if ($startTs > 0) {
-        fwrite(STDERR, 'dump_worker: 按 startTs=' . $startTs . " 定位起点文件...\n");
-        $located = dms_probe_start_file($host, $port, $user, $password, $startTs);
-        $file = (string) $located[0];
-        $pos = (string) $located[1];
-        $why = (string) $located[2];
-        if ($file === '') {
-            fwrite(STDERR, "dump_worker: 定位失败（{$why}）\n");
-            exit(2);
+        // ① XID/提交点轻量探针：SHOW BINLOG EVENTS 分页服务端扫描（不转移行数据），
+        //    命中 → 阶段 2 直接从该事务起点读，跳过历史段；未命中回退全扫。
+        [$wFile, $wPos, $wHit] = dms_probe_window_pos($host, $port, $user, $password, $file, $startTs);
+        if ($wHit) {
+            if ($wFile !== '') {
+                $file = $wFile;
+            }
+            $pos = $wPos;
+            fwrite(STDERR, "dump_worker: XID 探针命中，起点 {$file} pos={$pos}（跳过历史段）\n");
+        } else {
+            // ② 回退：原文件选择 + 文件头全扫（慢但正确；窗口更旧或探针超时时）
+            fwrite(STDERR, 'dump_worker: XID 探针未命中，按 startTs=' . $startTs . " 定位起点文件...\n");
+            $located = dms_probe_start_file($host, $port, $user, $password, $startTs);
+            $file = (string) $located[0];
+            $pos = (string) $located[1];
+            $why = (string) $located[2];
+            if ($file === '') {
+                fwrite(STDERR, "dump_worker: 定位失败（{$why}）\n");
+                exit(2);
+            }
+            fwrite(STDERR, "dump_worker: 起点文件 {$file} pos={$pos}（{$why}，全扫历史段）\n");
         }
-        fwrite(STDERR, "dump_worker: 起点文件 {$file} pos={$pos}（{$why}）\n");
     }
 
     $binLogStream = new MySQLReplicationFactory(
@@ -337,6 +575,12 @@ function dms_dump_worker_main(array $args): void
             private function collectRow(string $kind, $tableMap, array $rows, $eventInfo): void
             {
                 $st = $this->st;
+                // 窗口起点之前的历史行：直接丢弃，不构造 before/after 镜像、不进 pending。
+                // 否则扫描数月历史 binlog 时内存与耗时都随历史量线性增长。
+                $ts = (int) ($eventInfo->timestamp ?? 0);
+                if ($st->startTs > 0 && $ts > 0 && $ts < $st->startTs) {
+                    return;
+                }
                 $schema = (string) ($tableMap->database ?? '');
                 $table = (string) ($tableMap->table ?? '');
                 if ($st->dbFilter !== '' && $schema !== $st->dbFilter) {

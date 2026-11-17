@@ -1,0 +1,39 @@
+# macOS 编译入口（Darwin / Apple Silicon + Apple Clang）
+#
+# 与 Windows 的 project.yml 的区别：
+#   - 宿主 Homebrew PHP 只有 cli SAPI，没有 libphp → 由 tpc 用 php-builder 从 php-src
+#     现编一份静态 embed 运行时（缓存 ~/.typephp，第二次构建起复用）。
+#   - Windows 靠二进制同目录 php.ini 动态加载 .dll；macOS 把扩展静态编进 libphp.a
+#     （--disable-all 下必须显式列全，否则 /connect 与 dump worker 会缺函数）。
+#
+# 注意：命令行**不要**再传 --php-builder，否则 tpc 会用 CLI 的 `{}` 覆盖本段配置。
+#
+# 用法：./build-macos.sh [其它 tpc 参数，例如 --dry / -O2]
+
+name: binlog-agent
+mode: bin
+version: 1.0.0
+output: binlog-agent
+sources:
+  - src
+build-dir: build/macos
+
+# 私有 PHP 运行时扩展（php 8.5.11 NTS，与宿主 PHP 8.5.7 NTS 匹配）
+#   pdo / pdo_mysql : /connect、/query、dump worker 的 SHOW BINARY LOGS
+#   sockets         : krowinski 的 socket_* 直连 binlog 流
+#   bcmath          : krowinski 的 bcadd/bccomp/bcmul/bcpow（binlog 位运算）
+#   filter          : krowinski Config 的 filter_var 入参校验
+#   mbstring        : doctrine/dbal 与 symfony polyfill 的多字节处理
+#   ctype           : doctrine/dbal 的字符类型判断
+#   json            : 帧编解码（core 扩展，列出仅为显式）
+php-builder:
+  extensions:
+    - pdo
+    - pdo_mysql
+    - sockets
+    - bcmath
+    - filter
+    - mbstring
+    - ctype
+    - json
+  zts: off

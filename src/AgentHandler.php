@@ -44,6 +44,8 @@ final class AgentHandler
     private $dumpErrPipe = null;
     /** 行缓冲（JSON 行可能跨多次读取） */
     private string $dumpBuffer = '';
+    /** 子进程 stderr 累积（异常退出时随 error 帧回传，避免只剩退出码） */
+    private string $dumpErrBuf = '';
     /** 发送通道（注入，替代不可编译的闭包回调） */
     private ?ClientConn $client = null;
 
@@ -272,6 +274,7 @@ final class AgentHandler
         $this->dumpPipe = $pipes[1];
         $this->dumpErrPipe = $pipes[2];
         $this->dumpBuffer = '';
+        $this->dumpErrBuf = '';
         $this->dumping = true;
 
         // 通知 Server 把管道加入事件循环 select
@@ -345,14 +348,23 @@ final class AgentHandler
         if ($exitCode === 0) {
             $this->sse('', 'binlog-end', ['exitCode' => 0]);
         } else {
-            $err = '';
+            // stderr 可能已被 Server 事件循环读走（累积在 dumpErrBuf），也可能
+            // 子进程刚退出还没刷入管道。切回阻塞读取把剩余部分一次性取完，避免竞态丢诊断。
+            $err = $this->dumpErrBuf;
             if ($this->dumpErrPipe !== null && is_resource($this->dumpErrPipe)) {
-                $err = trim((string) @stream_get_contents($this->dumpErrPipe));
-                $err = substr($err, -300);
+                @stream_set_blocking($this->dumpErrPipe, true);
+                $err .= (string) @stream_get_contents($this->dumpErrPipe);
             }
+            $err = substr(trim($err), -300);
             $this->sse('', 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => 'binlog 解析进程异常退出 code=' . $exitCode . ($err !== '' ? ': ' . $err : '')]);
         }
         $this->teardownDump();
+    }
+
+    /** 由 Server 事件循环在子进程 stderr 可读时累积（诊断用） */
+    public function appendDumpErr(string $chunk): void
+    {
+        $this->dumpErrBuf = substr($this->dumpErrBuf . $chunk, -1000);
     }
 
     /** 心跳（仅 SSE 期间由 Server 定时器推送） */

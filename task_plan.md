@@ -32,6 +32,8 @@
 - [x] Phase 4 rung 4 端到端验证：.env 端口生效、/ping、/connect（驱动真实 TCP）、前端伺服、遍历拦截、404、关闭进程端口即死、CLI 覆盖 .env
 - [x] Phase 5 打包验收：package.bat 组包 22MB → 独立目录 + 最小 PATH 全通过；浏览器视觉验收（SPA 渲染 + "代理已连接"）
 - [ ] Phase 6 提交（小步、按 ub-mode 规范）
+- [x] Phase 7 macOS 构建（Apple Silicon）：tpc v0.10.0 源码版 + php-builder 私有运行时，产出 Mach-O binlog-agent（2026-11-17）
+- [x] Phase 8 dump 24h 窗口故障排查：内存耗尽 255 + stderr 诊断回传，真实 5.7 库复测 176 条变更（2026-11-17）
 
 ## 目标达成对照（用户验收标准 → 证据）
 | 要求 | 证据 |
@@ -41,13 +43,21 @@
 | 关闭二进制后自动退出 web 服务 | taskkill 后 curl 立即 refused（进程内服务）|
 | 二进制同级 .env 指定端口 | .env PORT=9721 → 9721 生效（8080 拒连）；--port 可覆盖 |
 | 前端监听端口跟着变 | 前端由二进制同端口伺服 + 默认地址=location.origin（浏览器验收：9721/8080 均渲染 + "代理已连接"）|
+| macOS 原生二进制（追加目标） | project.macos.yml + build-macos.sh → binlog-agent（Mach-O arm64 12MB）；24h 窗口 52s 拉到 176 条变更（30 insert + 146 update）+ binlog-end |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
-| (待记录) | | |
+| macOS 下 tpc v0.9.5 缺 host embed 库（Homebrew PHP 只有 cli SAPI） | 1 | 改 tpc v0.10.0 源码版 + `php-builder` 现编私有静态 embed 运行时（~/.typephp 缓存） |
+| 静态 PHPX cmake 子构建缺 gmpxx.h / mpfr.h | 1 | 导出 CPATH/CPLUS_INCLUDE_PATH/LIBRARY_PATH=/opt/homebrew（写进 build-macos.sh） |
+| dump 24h 窗口 0 变更 + code=255 | 1 | 直连 worker 复现：私有运行时默认 memory_limit=128M，顺序解析 37MB 历史 binlog OOM → worker 内 ini_set 1024M + 窗口前历史行早丢弃 |
+| 255 错误帧无原因（stderr 被 Server 事件循环读走） | 1 | AgentHandler.dumpErrBuf 累积 + finishDump 切阻塞读管道残余；worker 函数边界 try/catch（embed 链上 set_exception_handler 无效，实测仍 255）→ 退出码 2 + 可读诊断 |
 
 ## 风险
 - TypePHP 对 stream_socket_server/stream_select/proc_open 的运行时支持未验证（最大风险，Phase 2 尽早触发 rung 4 冒烟）
 - 前端 build 产物体积与 embedded-files 机制可行性未验证
 - Windows 下 .env 同目录定位：PHP_BINARY 在编译二进制中的取值需实测
+
+## 风险（macOS，2026-11-17 起）
+- 产物依赖 Homebrew dylib（gmp/gmpxx/mpfr/oniguruma）：已由 `package-macos.sh` 解决（dylib 随包 + @rpath 改写，目标机无需 Homebrew）；brew 升级 soversion 变化时需同步脚本 DYLIBS 列表
+- [已解决 2026-11-18] 大历史 binlog 窗口顺序扫描：探针 v2 两阶段定位已实现（SHOW BINLOG EVENTS 二分边界 + krowinski XID 轻读，margin 256KB 逐级 expand，未命中回退全扫）；实测 37MB + 24h 窗口 45-52s → 14s，事件零遗漏，大文件不再 OOM
