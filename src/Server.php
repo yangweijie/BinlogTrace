@@ -9,9 +9,10 @@ namespace DmsAgent;
  *
  * 实现：
  *   - stream_socket_server 监听 TCP
- *   - stream_select 事件循环，并发处理多连接 + dump 子进程 stdout 管道
- *   - 支持 SSE 长流（dump）：HTTP 头 text/event-stream 后保持连接，子进程
- *     可读时逐行转发 binlog-change 帧；心跳由 select 超时驱动
+ *   - stream_select 事件循环处理多连接
+ *   - SSE 长流（dump）：HTTP 头 text/event-stream 后保持连接，
+ *     子进程输出走 runtime/dump_*.out 文件增量轮询（见 AgentHandler::dumpOutFile），
+ *     事件循环里绝不 fread proc_open 管道 —— Windows 上那样做会阻塞十几秒
  *
  * 跨平台：Windows 下 php -S 有 bug 卡死，但原生 socket + stream_select 无此问题。
  */
@@ -20,18 +21,13 @@ final class Server
     private $server;
     /** @var array<int, ClientConn> */
     private array $clients = [];
-    /** @var array<int, AgentHandler> dump 子进程 stdout 管道 -> handler 映射 */
-    private array $dumpPipes = [];
-    /** @var array<int, resource> fd -> 管道资源（select 用） */
-    private array $pipeFds = [];
-    /** @var array<int, resource> fd -> stderr 管道资源（select + 错误日志用） */
-    private array $errFds = [];
-    /** @var array<int, int> stdout fdKey -> 对应 stderr fdKey（dump 结束时一并清理） */
-    private array $errKeys = [];
-    /** @var array<int, AgentHandler> stderr fd -> handler（错误诊断回传用） */
-    private array $errOwners = [];
     private int $heartbeatSec = 15;
     private float $lastHeartbeat = 0;
+    /** 会话空闲扫描间隔（秒）与上次扫描时间 */
+    private const SWEEP_INTERVAL_SEC = 30.0;
+    /** 单连接出站积压上限：超过即判定客户端已不再读取 */
+    private const MAX_PENDING_BYTES = 16777216;
+    private float $lastSweep = 0;
     /** 进程启动时间戳（/ping 的 uptime 用；bin 模式下 $_SERVER 不可靠） */
     private static float $startedAt = 0;
 
@@ -65,6 +61,7 @@ final class Server
         fwrite(STDOUT, "agent: Ctrl+C 停止\n");
 
         $this->lastHeartbeat = microtime(true);
+        $this->lastSweep = $this->lastHeartbeat;
         self::$startedAt = $this->lastHeartbeat;
 
         while (true) {
@@ -80,19 +77,11 @@ final class Server
                 $read[] = $c->stream();
             }
         }
-        foreach ($this->pipeFds as $fd) {
-            $read[] = $fd;
-        }
-        foreach ($this->errFds as $fd) {
-            $read[] = $fd;
-        }
-        // 仅保留合法流资源：若某个 fd（如已退出的 dump 子进程管道）残留为失效资源，
-        // 过滤掉，避免 stream_select 对失效资源抛错使整个服务崩溃。
         $read = $this->filterReadable($read);
 
         $write = [];
         $except = [];
-        $timeoutSec = 0.2; // 心跳精度
+        $timeoutSec = 0.2; // 心跳与 dump 轮询精度
         $n = @stream_select($read, $write, $except, (int) $timeoutSec, (int) ($timeoutSec * 1_000_000));
         if ($n === false) {
             // 被信号打断等，继续
@@ -105,7 +94,7 @@ final class Server
             if (is_resource($conn)) {
                 stream_set_blocking($conn, false);
                 $id = (int) $conn;
-                $this->clients[$id] = new ClientConn($conn, $peer, $this);
+                $this->clients[$id] = new ClientConn($conn, $peer);
             }
         }
 
@@ -113,6 +102,25 @@ final class Server
         foreach ($this->clients as $cid => $c) {
             if ($c->closed()) {
                 $this->releaseClient($c);
+                unset($this->clients[$cid]);
+                continue;
+            }
+            // 先补写上一轮没写完的出站缓冲，再判断能否关闭
+            if ($c->pendingOutput()) {
+                $c->flushPending();
+            }
+            // 客户端长时间不读（页面卡死/代理断链）：缓冲会无上限堆积，
+            // 超阈值直接判定为死连接，停 dump 并断开，避免拖垮整个服务
+            if ($c->pendingBytes() > self::MAX_PENDING_BYTES) {
+                error_log('agent: 客户端写入积压超阈值，判定为死连接');
+                $this->releaseClient($c);
+                $c->close();
+                unset($this->clients[$cid]);
+                continue;
+            }
+            if ($c->shouldCloseAfterFlush() && !$c->pendingOutput()) {
+                $this->releaseClient($c);
+                $c->close();
                 unset($this->clients[$cid]);
                 continue;
             }
@@ -125,10 +133,13 @@ final class Server
                     $c->markDispatched();
                     $this->dispatch($c);
                     if (!$c->keepAlive()) {
-                        // 短响应：写完后关闭（SSE 连接会 keepAlive 保持）
-                        $c->close();
-                        $this->releaseClient($c);
-                        unset($this->clients[$cid]);
+                        // 短响应：缓冲冲完才关（大结果集一次 fwrite 可能只写出一部分）
+                        $c->flushPending();
+                        if (!$c->pendingOutput()) {
+                            $this->releaseClient($c);
+                            $c->close();
+                            unset($this->clients[$cid]);
+                        }
                     }
                 } elseif ($c->eof()) {
                     $this->releaseClient($c);
@@ -136,7 +147,7 @@ final class Server
                     unset($this->clients[$cid]);
                 }
             } elseif ($c->keepAlive()) {
-                // SSE 连接可读 = 客户端断开（select 已判定可读，读出空即 EOF）
+                // SSE 连接可读 = 客户端断开（select 已判可读，读出空即 EOF）
                 if ($c->detectDead()) {
                     $this->releaseClient($c);
                     $c->close();
@@ -145,53 +156,26 @@ final class Server
             }
         }
 
-        // 3a) dump 子进程 stderr 可读（错误诊断）
-        foreach ($this->errFds as $efd => $epipe) {
-            if (in_array($epipe, $read, true)) {
-                $chunk = @fread($epipe, 8192);
-                if ($chunk !== '' && $chunk !== false) {
-                    error_log('agent[dump-err]: ' . trim($chunk));
-                    $owner = $this->errOwners[$efd] ?? null;
-                    if ($owner instanceof AgentHandler) {
-                        $owner->appendDumpErr($chunk);
-                    }
-                }
-            }
-        }
-
-        // 3b) dump 子进程 stdout 可读
-        foreach ($this->pipeFds as $fdKey => $pipe) {
-            if (in_array($pipe, $read, true)) {
-                $handler = $this->dumpPipes[$fdKey] ?? null;
-                if ($handler instanceof AgentHandler) {
-                    $status = $handler->onDumpReadable();
-                    if ($status === 'ended') {
-                        // dump 结束：关闭对应 SSE 客户端连接
-                        unset($this->dumpPipes[$fdKey], $this->pipeFds[$fdKey]);
-                        // 同时清理 stderr 管道（finishDump 已 fclose，否则会残留在 errFds 中导致 stream_select 崩溃）
-                        $errKey = $this->errKeys[$fdKey] ?? null;
-                        if ($errKey !== null) {
-                            unset($this->errFds[$errKey], $this->errKeys[$fdKey], $this->errOwners[$errKey]);
-                        }
-                        foreach ($this->clients as $cid => $cc) {
-                            if ($cc->owner === $handler && $cc->keepAlive()) {
-                                $cc->close();
-                                unset($this->clients[$cid]);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // 3) dump 子进程：轮询输出文件（非阻塞）+ 回收已退出的进程句柄
+        AgentHandler::pollActiveDumps();
+        AgentHandler::reapFinished();
 
         // 4) 心跳：仅对正在 dump 的连接推送
         $now = microtime(true);
         if ($now - $this->lastHeartbeat >= $this->heartbeatSec) {
             $this->lastHeartbeat = $now;
-            foreach ($this->dumpPipes as $handler) {
-                if ($handler instanceof AgentHandler) {
-                    $handler->sendHeartbeat();
-                }
+            foreach (AgentHandler::activeDumpHandlers() as $handler) {
+                $handler->sendHeartbeat();
+            }
+        }
+
+        // 5) 会话空闲回收：HTTP 模式没有连接关闭事件，未 close 的会话会一直占着
+        //    handler + MySQL 连接（页面刷新/关标签是常态），按 TTL 主动销毁
+        if ($now - $this->lastSweep >= self::SWEEP_INTERVAL_SEC) {
+            $this->lastSweep = $now;
+            $dropped = SessionManager::sweepIdle(SessionManager::ttlSec());
+            if ($dropped > 0) {
+                error_log('agent: 回收空闲会话 ' . $dropped . ' 个（TTL=' . SessionManager::ttlSec() . 's）');
             }
         }
     }
@@ -203,43 +187,14 @@ final class Server
         $router->handle($req, $c);
     }
 
-    /** 客户端连接被释放：若它正在 dump，需停子进程并移除事件循环中的管道 */
+    /** 客户端连接被释放：若它正在 dump，停子进程（会话本身保留） */
     private function releaseClient(ClientConn $c): void
     {
         $owner = $c->owner;
         if ($owner === null) {
             return;
         }
-        foreach ($this->pipeFds as $fdKey => $pipe) {
-            if (($this->dumpPipes[$fdKey] ?? null) === $owner) {
-                unset($this->pipeFds[$fdKey], $this->dumpPipes[$fdKey]);
-                $errKey = $this->errKeys[$fdKey] ?? null;
-                if ($errKey !== null) {
-                    unset($this->errFds[$errKey], $this->errKeys[$fdKey], $this->errOwners[$errKey]);
-                }
-            }
-        }
         $owner->stopDump();
-    }
-
-    /**
-     * 由 ClientConn::registerDumpPipe 转发调用：把 dump 子进程管道注册到事件循环。
-     */
-    public function registerDumpPipe($pipe, ?AgentHandler $handler): void
-    {
-        if (!is_resource($pipe) || $handler === null) {
-            return;
-        }
-        $fdKey = (int) $pipe;
-        $this->pipeFds[$fdKey] = $pipe;
-        $this->dumpPipes[$fdKey] = $handler;
-        $err = $handler->dumpErrPipe();
-        if (is_resource($err)) {
-            $errKey = (int) $err;
-            $this->errFds[$errKey] = $err;
-            $this->errKeys[$fdKey] = $errKey;
-            $this->errOwners[$errKey] = $handler;
-        }
     }
 
     private function filterReadable(array $read): array

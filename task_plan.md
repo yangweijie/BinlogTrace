@@ -34,6 +34,8 @@
 - [ ] Phase 6 提交（小步、按 ub-mode 规范）
 - [x] Phase 7 macOS 构建（Apple Silicon）：tpc v0.10.0 源码版 + php-builder 私有运行时，产出 Mach-O binlog-agent（2026-11-17）
 - [x] Phase 8 dump 24h 窗口故障排查：内存耗尽 255 + stderr 诊断回传，真实 5.7 库复测 176 条变更（2026-11-17）
+- [x] Phase 9 库/表过滤下推（2026-11-18）：worker `--db`/`--tables` + AgentHandler 透传 + 前端 `cfg.table` 下发；修复「选了 shengyibao 却显示全实例变更」
+- [x] Phase 10 移植缺口审计与补齐（2026-11-18）：对照 git 历史中 webman/agent-workerman 实现，11 项缺口全部补齐并实测；过程中另修 3 个既有缺陷（Windows 管道阻塞拖死全服务 / fwrite 短写丢数据 / dev CLI 无 worker 入口）
 
 ## 目标达成对照（用户验收标准 → 证据）
 | 要求 | 证据 |
@@ -52,6 +54,15 @@
 | 静态 PHPX cmake 子构建缺 gmpxx.h / mpfr.h | 1 | 导出 CPATH/CPLUS_INCLUDE_PATH/LIBRARY_PATH=/opt/homebrew（写进 build-macos.sh） |
 | dump 24h 窗口 0 变更 + code=255 | 1 | 直连 worker 复现：私有运行时默认 memory_limit=128M，顺序解析 37MB 历史 binlog OOM → worker 内 ini_set 1024M + 窗口前历史行早丢弃 |
 | 255 错误帧无原因（stderr 被 Server 事件循环读走） | 1 | AgentHandler.dumpErrBuf 累积 + finishDump 切阻塞读管道残余；worker 函数边界 try/catch（embed 链上 set_exception_handler 无效，实测仍 255）→ 退出码 2 + 可读诊断 |
+| 客户端中途断开后整个服务卡死（/ping 无响应、CPU 不涨） | 3 | ①埋点定位到 step3b 的第一次 fread；②实测 `stream_set_blocking` 对 proc_open 管道返回 false、fread 阻塞 14.8s；③HEAD 基线同样卡死 → 确认是重写时丢了 webman 的「文件重定向+增量轮询」；改 runtime/dump_*.out 文件轮询 + 异步 proc_close 回收 |
+| `php bin/dump_worker.php` 直跑无任何输出（V2 测试全空） | 1 | 文件只定义函数无 CLI 入口；dev 模式 dump 因此静默 0 变更。补 `PHP_SAPI==='cli' && realpath($argv[0])===__FILE__` 自启动 |
+| 哨兵类写在文件顶层 implements SocketInterface → Interface not found fatal | 1 | PHP 早绑定发生在 vendor autoload 之前；改为在 run() 内 autoload 之后条件声明 |
+| 用 peer 做会话指纹替换旧会话无效（sessions=3） | 1 | HTTP 模式每次连接临时端口都变；改为前端 sessionStorage 存 prevSession 上报，Router 精确替换 |
+| 只 SET GLOBAL binlog_transaction_compression=ON 后哨兵不命中 | 1 | 当前会话仍按 OFF 写事务；补 SET SESSION 后 SHOW BINLOG EVENTS 出现 Transaction_payload → exit 12 → 1012 帧 |
+| `cmd /c "tpc-build.bat ..."` 只打印 cmd 横幅、exe 未更新 | 1 | MSYS 把 `/c` 当路径转换；改 `cmd //c` |
+| 8092 端口 bind 失败（访问权限不允许） | 1 | Windows 保留端口段；换 8091 |
+| 并发 query「12 条只回 1 条」误判 | 1 | 是 `>>` 采集脚本问题；改逐条 -o 采集后 8/8 HTTP 200 且 rows 正确 |
+| 多个残留 dev agent 同端口导致测试被污染 | 1 | Windows 允许多进程绑同端口，应答的是旧卡死进程；按 CommandLine 精确 kill 后换端口重测 |
 
 ## 风险
 - TypePHP 对 stream_socket_server/stream_select/proc_open 的运行时支持未验证（最大风险，Phase 2 尽早触发 rung 4 冒烟）
@@ -61,3 +72,10 @@
 ## 风险（macOS，2026-11-17 起）
 - 产物依赖 Homebrew dylib（gmp/gmpxx/mpfr/oniguruma）：已由 `package-macos.sh` 解决（dylib 随包 + @rpath 改写，目标机无需 Homebrew）；brew 升级 soversion 变化时需同步脚本 DYLIBS 列表
 - [已解决 2026-11-18] 大历史 binlog 窗口顺序扫描：探针 v2 两阶段定位已实现（SHOW BINLOG EVENTS 二分边界 + krowinski XID 轻读，margin 256KB 逐级 expand，未命中回退全扫）；实测 37MB + 24h 窗口 45-52s → 14s，事件零遗漏，大文件不再 OOM
+
+## 风险（Windows 移植，2026-11-18 起）
+- [已解决] 事件循环里 fread proc_open 管道：Windows 上无法非阻塞（stream_set_blocking 返回 false），实测阻塞 14.8s，一次客户端断开即可永久拖死服务。已改文件重定向 + 增量轮询 + 异步 proc_close；HEAD 基线对照确认是重写时丢失的 webman 设计
+- [已解决] SSE/短响应 fwrite 短写丢数据（非阻塞 socket 返回值被忽略）→ ClientConn 出站缓冲 + 每 tick 续写 + 16MB 积压判死
+- [已解决] 会话无回收：prevSession 精确替换 + TTL 扫描（DMS_SESSION_TTL 可覆盖，默认 1800s）
+- [未处理] vendor/ 被 gitignore 且 composer.json 无 patches 声明：krowinski 的 caching_sha2 AuthMoreData 排空补丁只存在于本机工作树，换机 composer install 会丢（表现为 caching_sha2 账号下 dump 0 事件或 255）。建议固化为 patches/*.patch + composer hook
+- [未处理] 前端 ws-agent-url.test.ts 2 例既有失败：断言硬编码 127.0.0.1:8080，而 ws.ts 自 11-12 重写起用 window.location.origin（jsdom 下 localhost:3000）

@@ -43,6 +43,33 @@ interface Frame {
   payload: unknown;
 }
 
+const PREV_SESSION_KEY = 'dms.prevSession';
+
+/**
+ * 本标签页最近一次 connect 拿到的 session token。
+ * agent 是 HTTP 模式，没有「连接关闭」事件；页面刷新或重进连接页会再 connect 一次，
+ * 旧会话只能靠 agent 侧 TTL 回收。带上这个 token，agent 就能在 connect 时精确替换掉它。
+ */
+function readPrevSession(): string {
+  try {
+    return sessionStorage.getItem(PREV_SESSION_KEY) || '';
+  } catch {
+    return ''; // 隐私模式/无 storage：退化为 TTL 回收
+  }
+}
+
+function writePrevSession(token: string): void {
+  try {
+    if (token === '') {
+      sessionStorage.removeItem(PREV_SESSION_KEY);
+    } else {
+      sessionStorage.setItem(PREV_SESSION_KEY, token);
+    }
+  } catch {
+    // 同上，忽略
+  }
+}
+
 export class WsClient {
   private handlers: WsHandlers;
   private session = '';
@@ -69,7 +96,8 @@ export class WsClient {
       id: rid(),
       type: 'connect',
       ts: Date.now(),
-      payload: opts,
+      // prevSession：本标签页上一个会话 token，供 agent 精确回收旧会话
+      payload: { ...opts, prevSession: readPrevSession() },
     };
     let resp: Response;
     try {
@@ -91,6 +119,7 @@ export class WsClient {
     }
     const payload = (data.payload ?? {}) as ConnectedPayload & { session?: string };
     this.session = payload.session ?? '';
+    writePrevSession(this.session);
     return payload as ConnectedPayload;
   }
 
@@ -151,6 +180,8 @@ export class WsClient {
     // 真正中断仍在进行中的 fetch/SSE 流（#2 修复：此前流无法被中止）
     this.abort?.abort();
     this.abort = null;
+    // 会话已显式销毁，不再让下次 connect 把它当 prevSession 上报
+    writePrevSession('');
     const frame: Frame = {
       v: 2,
       id: rid(),

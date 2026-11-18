@@ -84,3 +84,19 @@
   命中范围为内首个 XID → expand（该事务可能始于 fromPos 之前，防漏事件）；未命中/超时 → 回退旧文件选择 + 全扫（保正确）。
   实测 37MB + 24h 窗口：45-52s → **14s**，176 条事件零遗漏、大文件不再 OOM。
 - **MySQL 5.7 探针相关事实**：`SHOW BINLOG EVENTS` **无时间戳列**；Query 事件 Info **无 `SET TIMESTAMP=` 前缀**（只有 `BEGIN`/语句本身）；`FROM <pos>` 需精确事件边界（否则 error 1220）；`LIMIT offset,count` 可用；37MB 文件事件数 ~20 万。时间戳只能从 COM_BINLOG_DUMP 事件头取（krowinski `EventInfo->timestamp`）。→ v1 探针（SHOW 分页找 `SET TIMESTAMP`）因此注定不命中，已废弃。
+
+## 移植缺口审计（2026-11-18，对照 git 历史中 webman/agent-workerman 实现）
+旧实现在 `1bf13d0`（typephp 重写）被删；用 `git show 1bf13d0^:webman/app/DmsAgent/WsHandler.php` 等逐项比对。11 项缺口全部补齐（见 progress.md 验证表）：endTs 未来值钳制、ext-sockets 双层守卫、压缩 binlog 1012 诊断、心跳 5s→2s、SSE 错误帧后关连接、退出前排空 stdout、query 串行/复用、重复 connect 替换、会话 TTL/GC、Frame 编码失败 1013 兜底、`@@server_id` 采集。
+
+**过程中发现的 3 个既有缺陷（比缺口更严重，均已修）**
+1. **Windows 管道阻塞拖死全服务**：`stream_set_blocking($pipe,false)` 返回 **false**；对照实验 `select` 返回 0（211ms）后 `fread` **阻塞 14.8s** 直到子进程写出下一行。客户端中途断开 → `/ping` 全无响应、主进程 CPU 时间不涨（0.70→0.72，纯阻塞）、杀掉 dump 子进程立刻恢复。HEAD 基线二进制同样卡死（58 条后 WEDGED）→ 确认是重写时丢了 webman 的「stdout/stderr 重定向到文件 + 增量轮询」设计。修复后：8s 内 2988 条、掐断后 ping 全程 ok、无残留子进程、runtime 临时文件自动回收。
+2. **fwrite 短写丢数据**：非阻塞 socket 写不完时返回值被忽略 → 半行 JSON 丢失、客户端卡在残缺帧。修复：ClientConn 出站缓冲 + 每 tick 续写 + 16MB 积压判死；短响应改为「冲完才关」。
+3. **`bin/dump_worker.php` 无 CLI 入口**：只定义函数不执行 → dev 模式（AgentHandler 用 PHP_BINARY 拉脚本）子进程立刻退出 0，表现为「dump 正常结束、0 变更、无任何报错」。补 `realpath($argv[0])===__FILE__` 自启动。
+
+**关键事实/坑（可复用）**
+- 压缩 binlog 检测：`binlog_transaction_compression=ON` 时行事件被裹进 `TRANSACTION_PAYLOAD_EVENT`(40)，krowinski 既不解析也不订阅 → 静默 0 变更。解法：包装 `SocketInterface` 在包头偏移 5 识别 type=40 → 退出码 12 → agent 回 1012。**只 SET GLOBAL 无效**，必须同时 SET SESSION（否则当前会话仍按 OFF 写事务，哨兵永远不命中）；验证用 `SHOW BINLOG EVENTS` 看是否出现 `Transaction_payload`。
+- 哨兵类不能写在 dump_worker.php 顶层：`implements \MySQLReplication\Socket\SocketInterface` 触发 PHP 早绑定，vendor 未加载时 `Interface not found` fatal，连正常路径一起拖死；必须在 autoload 之后（run() 内）条件声明。
+- HTTP 模式无法用 peer 做会话指纹：每次连接临时端口都变（实测 sessions=3）。正确做法：前端 sessionStorage 存 `dms.prevSession`，connect 时上报，agent 精确替换；兜底 TTL 扫描。
+- `cmd /c` 在 Git Bash 下被 MSYS 当路径转换（只打印 cmd 横幅、构建没跑）→ 必须 `cmd //c`；判断构建是否真跑要看 exe 的 mtime，不能只看 exit code。
+- Windows 保留端口段会让 bind 报「访问权限不允许」（8092）；且**允许多进程绑同一端口**，残留旧 agent 会替新进程应答 → 测试前必须按 CommandLine 精确清理。
+- RDS 事实复核：`log_bin_use_v1_row_events=1`（本地同版本 8.0.36 为 0）→ 只发 V1 行事件 23/24/25；`binlog_row_metadata=MINIMAL`（krowinski 走 information_schema 补列名，正常）；testdba 为 mysql_native_password，可访问 mysql 库与 SHOW BINARY LOGS。

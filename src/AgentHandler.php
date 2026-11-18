@@ -38,14 +38,25 @@ final class AgentHandler
 
     /** dump 子进程资源（proc_open 返回） */
     private $dumpProc = null;
-    /** 子进程 stdout 管道（非阻塞，由 Server 事件循环 select 读取） */
-    private $dumpPipe = null;
-    /** 子进程 stderr 管道 */
-    private $dumpErrPipe = null;
+    /**
+     * 子进程 stdout 重定向文件（而非管道）。
+     * Windows 下 proc_open 管道无法设为非阻塞（stream_set_blocking 返回 false），
+     * 事件循环里任何 fread 都可能阻塞十几秒直到子进程写出下一行 —— 整个服务被拖死。
+     * 旧 webman 版因此用文件重定向 + 增量轮询，此处沿用同一方案。
+     */
+    private string $dumpOutFile = '';
+    private string $dumpErrFile = '';
+    /** stdout/stderr 文件已读偏移（增量轮询） */
+    private int $dumpOffset = 0;
+    private int $dumpErrOffset = 0;
     /** 行缓冲（JSON 行可能跨多次读取） */
     private string $dumpBuffer = '';
     /** 子进程 stderr 累积（异常退出时随 error 帧回传，避免只剩退出码） */
     private string $dumpErrBuf = '';
+    /** 正在 dump 的 handler 注册表（Server 事件循环每个 tick 轮询其输出文件） */
+    private static array $activeDump = [];
+    /** 已退出但尚未 proc_close 的子进程（避免同步 proc_close 阻塞事件循环） */
+    private static array $reapQueue = [];
     /** 发送通道（注入，替代不可编译的闭包回调） */
     private ?ClientConn $client = null;
 
@@ -202,21 +213,35 @@ final class AgentHandler
     public function handleDump(string $id, array $payload): void
     {
         if (!$this->connected || $this->mysqlHost === '') {
-            $this->sse($id, 'error', ['code' => AgentConstants::PROXY_NOT_READY, 'message' => '尚未连接 MySQL']);
+            $this->failSse($id, AgentConstants::PROXY_NOT_READY, '尚未连接 MySQL');
             return;
         }
         if ($this->dumping) {
-            $this->sse($id, 'error', ['code' => AgentConstants::INVALID_PARAM, 'message' => '已在追踪中']);
+            $this->failSse($id, AgentConstants::INVALID_PARAM, '已在追踪中');
             return;
         }
         $fileName = (string) ($payload['binlogFile'] ?? $this->binlogFile);
         $filePos = (int) ($payload['binlogPos'] ?? 4);
         if ($fileName === '') {
-            $this->sse($id, 'error', ['code' => AgentConstants::INVALID_PARAM, 'message' => 'binlogFile 不能为空']);
+            $this->failSse($id, AgentConstants::INVALID_PARAM, 'binlogFile 不能为空');
             return;
         }
         $startTs = (int) ($payload['startMs'] ?? 0) > 0 ? intdiv((int) $payload['startMs'], 1000) : 0;
         $endTs = (int) ($payload['endMs'] ?? 0) > 0 ? intdiv((int) $payload['endMs'], 1000) : 0;
+        // 历史追溯语义：结束时间不等待未来时刻。前端表单残留/误选未来 endTs 时，
+        // worker 会一直 tail 到该时刻（心跳兜底 time()>endTs+2 迟迟不成立），
+        // 表现为进度条转圈不停；收敛到当前时间后，历史追平即快速退出。
+        if ($endTs > 0) {
+            $endTs = min($endTs, time());
+        }
+
+        // 预检失败一律以「错误帧 + 关闭 SSE」返回：此时没有子进程可等，
+        // 不关闭会让服务端连接与客户端 fetch 流一直挂着（旧 webman 版有 closeSse）
+        if (!function_exists('socket_create') || !function_exists('socket_shutdown')) {
+            $this->failSse($id, AgentConstants::INTERNAL_ERROR,
+                '当前 PHP 缺少 ext-sockets 扩展，无法解析 binlog（php.ini 启用 extension=php_sockets.dll，并确认 extension_dir 有效）');
+            return;
+        }
 
         // dump worker 的两种拉起方式：
         //   embed（编译二进制）：再次拉起自身二进制，走 __dump_worker 隐藏子命令，
@@ -229,7 +254,7 @@ final class AgentHandler
             $workerCheck = __DIR__ . '/../bin/dump_worker.php';
         }
         if (!is_file($workerCheck)) {
-            $this->sse($id, 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => 'dump 解析脚本缺失: ' . $workerCheck]);
+            $this->failSse($id, AgentConstants::INTERNAL_ERROR, 'dump 解析脚本缺失: ' . $workerCheck);
             return;
         }
 
@@ -244,6 +269,33 @@ final class AgentHandler
             . ' --user ' . escapeshellarg($this->mysqlUser)
             . ' --file ' . escapeshellarg($fileName)
             . ' --pos ' . $filePos;
+        // 库级过滤：worker 按 schema 精确匹配，缺省用 connect 时选的库；
+        // 不传会输出实例上全部库的变更（RDS 共享实例含 mysql./其他业务库）
+        $dbFilter = trim((string) ($payload['database'] ?? ''));
+        if ($dbFilter === '') {
+            $dbFilter = trim($this->mysqlDatabase);
+        }
+        if ($dbFilter !== '') {
+            $cmd .= ' --db ' . escapeshellarg($dbFilter);
+        }
+        // 表级过滤：前端多选表名（数组或逗号串），'全部'/空 = 不限制
+        $tablesIn = $payload['tables'] ?? [];
+        $tablesArr = [];
+        if (is_string($tablesIn)) {
+            $tablesArr = explode(',', $tablesIn);
+        } elseif (is_array($tablesIn)) {
+            $tablesArr = $tablesIn;
+        }
+        $tablesList = [];
+        foreach ($tablesArr as $one) {
+            $name = trim((string) $one);
+            if ($name !== '' && $name !== '全部') {
+                $tablesList[] = $name;
+            }
+        }
+        if ($tablesList !== []) {
+            $cmd .= ' --tables ' . escapeshellarg(implode(',', $tablesList));
+        }
         if ($startTs > 0) {
             $cmd .= ' --start-ts ' . $startTs;
         }
@@ -251,11 +303,22 @@ final class AgentHandler
             $cmd .= ' --end-ts ' . $endTs;
         }
 
+        // stdout/stderr 重定向到文件，不用管道：Windows 下 proc_open 管道无法设为非阻塞
+        // （stream_set_blocking 直接返回 false），事件循环里 fread 会一直等到子进程
+        // 写出下一行 —— 实测可阻塞 14.8 秒，整个服务被拖死（/ping 都无响应）。
+        $runtime = Runtime::$binDir . '/runtime';
+        if (!is_dir($runtime)) {
+            @mkdir($runtime, 0777, true);
+        }
+        $tag = bin2hex(random_bytes(4));
+        $outFile = $runtime . '/dump_' . $this->serverId . '_' . $tag . '.out';
+        $errFile = $runtime . '/dump_' . $this->serverId . '_' . $tag . '.err';
+
         $proc = proc_open(
             $cmd,
             [
-                1 => ['pipe', 'w'],
-                2 => ['pipe', 'w'],
+                1 => ['file', $outFile, 'w'],
+                2 => ['file', $errFile, 'w'],
             ],
             $pipes,
             Runtime::$binDir,
@@ -263,49 +326,106 @@ final class AgentHandler
             ['bypass_shell' => true]
         );
         if (!is_resource($proc)) {
-            $this->sse($id, 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => '无法启动 krowinski 解析进程']);
+            $this->failSse($id, AgentConstants::INTERNAL_ERROR, '无法启动 krowinski 解析进程');
             return;
         }
-        // 非阻塞管道：由 Server 事件循环 select 读取，不阻塞主循环
-        stream_set_blocking($pipes[1], false);
-        stream_set_blocking($pipes[2], false);
 
         $this->dumpProc = $proc;
-        $this->dumpPipe = $pipes[1];
-        $this->dumpErrPipe = $pipes[2];
+        $this->dumpOutFile = $outFile;
+        $this->dumpErrFile = $errFile;
+        $this->dumpOffset = 0;
+        $this->dumpErrOffset = 0;
         $this->dumpBuffer = '';
         $this->dumpErrBuf = '';
         $this->dumping = true;
-
-        // 通知 Server 把管道加入事件循环 select
-        if ($this->client !== null) {
-            $this->client->registerDumpPipe($this->dumpPipe);
-        }
+        self::$activeDump[$this->sessionToken] = $this;
 
         $this->sse('', 'dump-started', ['binlogFile' => $fileName, 'binlogPos' => $filePos]);
     }
 
     /**
-     * 由 Server 事件循环在 dump 子进程 stdout 可读时调用，解析 JSON 行并转 binlog-change 帧。
-     * 返回 'running' | 'ended' | 'error'。
+     * Server 事件循环每个 tick 调用：轮询所有在跑的 dump 子进程输出文件。
+     * 读文件而不是读管道，是为了让读取永远不阻塞（见 dumpOutFile 注释）。
      */
-    public function onDumpReadable(): string
+    public static function pollActiveDumps(): void
     {
-        if ($this->dumpPipe === null) {
-            return 'ended';
-        }
-        $chunk = @fread($this->dumpPipe, 65536);
-        if ($chunk === '' || $chunk === false) {
-            // 管道 EOF 或暂无可读：检查进程是否仍存活
-            if ($this->dumpProc !== null) {
-                $st = proc_get_status($this->dumpProc);
-                if (!$st['running']) {
-                    $this->finishDump((int) $st['exitcode']);
-                    return 'ended';
-                }
+        foreach (self::$activeDump as $token => $h) {
+            if (!$h instanceof self) {
+                unset(self::$activeDump[$token]);
+                continue;
             }
-            return 'running';
+            $h->pollDump();
         }
+    }
+
+    /** @return array<string, AgentHandler> 正在 dump 的 handler（Server 心跳与清理用） */
+    public static function activeDumpHandlers(): array
+    {
+        return self::$activeDump;
+    }
+
+    private function pollDump(): void
+    {
+        if (!$this->dumping) {
+            unset(self::$activeDump[$this->sessionToken]);
+            return;
+        }
+        $r = self::readFrom($this->dumpOutFile, $this->dumpOffset);
+        $this->dumpOffset = (int) $r[1];
+        if ((string) $r[0] !== '') {
+            $this->consumeStdout((string) $r[0]);
+        }
+        $e = self::readFrom($this->dumpErrFile, $this->dumpErrOffset);
+        $this->dumpErrOffset = (int) $e[1];
+        if ((string) $e[0] !== '') {
+            $this->appendDumpErr((string) $e[0]);
+        }
+        if ($this->dumpProc === null) {
+            unset(self::$activeDump[$this->sessionToken]);
+            return;
+        }
+        $st = @proc_get_status($this->dumpProc);
+        if (is_array($st) && !($st['running'] ?? true)) {
+            // 子进程已退出：再排空一次文件尾，保证最后几行 change 不丢
+            $t = self::readFrom($this->dumpOutFile, $this->dumpOffset);
+            $this->dumpOffset = (int) $t[1];
+            if ((string) $t[0] !== '') {
+                $this->consumeStdout((string) $t[0]);
+            }
+            $te = self::readFrom($this->dumpErrFile, $this->dumpErrOffset);
+            $this->dumpErrOffset = (int) $te[1];
+            if ((string) $te[0] !== '') {
+                $this->appendDumpErr((string) $te[0]);
+            }
+            $this->finishDump((int) ($st['exitcode'] ?? 0));
+        }
+    }
+
+    /** 从文件 offset 读到当前末尾，返回 [新增内容, 新偏移] */
+    private static function readFrom(string $path, int $offset): array
+    {
+        if ($path === '') {
+            return ['', $offset];
+        }
+        $size = @filesize($path);
+        if ($size === false || $size <= $offset) {
+            return ['', $offset];
+        }
+        $h = @fopen($path, 'rb');
+        if ($h === false) {
+            return ['', $offset];
+        }
+        if ($offset > 0) {
+            @fseek($h, $offset);
+        }
+        $data = (string) @stream_get_contents($h);
+        @fclose($h);
+        return [$data, $offset + strlen($data)];
+    }
+
+    /** 解析 stdout 缓冲中的完整 JSON 行，转 binlog-change 帧 */
+    private function consumeStdout(string $chunk): void
+    {
         $this->dumpBuffer .= $chunk;
         while (($nl = strpos($this->dumpBuffer, "\n")) !== false) {
             $line = trim(substr($this->dumpBuffer, 0, $nl));
@@ -332,36 +452,30 @@ final class AgentHandler
                 'binlogPos' => (int) ($obj['binlogPos'] ?? 0),
             ]);
         }
-        // 再次确认进程是否已退出（子进程可能已写完并退出）
-        if ($this->dumpProc !== null) {
-            $st = proc_get_status($this->dumpProc);
-            if (!$st['running']) {
-                $this->finishDump((int) $st['exitcode']);
-                return 'ended';
-            }
-        }
-        return 'running';
     }
 
     private function finishDump(int $exitCode): void
     {
         if ($exitCode === 0) {
             $this->sse('', 'binlog-end', ['exitCode' => 0]);
+        } elseif ($exitCode === 12) {
+            // worker 侧哨兵：binlog_transaction_compression=ON，行事件被封装无法解码
+            $this->sse('', 'error', [
+                'code' => AgentConstants::TRANSACTION_COMPRESSED,
+                'message' => '该实例开启了 binlog 事务压缩（binlog_transaction_compression=ON），行事件无法解析；请关闭后重试：SET GLOBAL binlog_transaction_compression=OFF',
+            ]);
         } else {
-            // stderr 可能已被 Server 事件循环读走（累积在 dumpErrBuf），也可能
-            // 子进程刚退出还没刷入管道。切回阻塞读取把剩余部分一次性取完，避免竞态丢诊断。
-            $err = $this->dumpErrBuf;
-            if ($this->dumpErrPipe !== null && is_resource($this->dumpErrPipe)) {
-                @stream_set_blocking($this->dumpErrPipe, true);
-                $err .= (string) @stream_get_contents($this->dumpErrPipe);
-            }
-            $err = substr(trim($err), -300);
+            $err = substr(trim($this->dumpErrBuf), -300);
             $this->sse('', 'error', ['code' => AgentConstants::INTERNAL_ERROR, 'message' => 'binlog 解析进程异常退出 code=' . $exitCode . ($err !== '' ? ': ' . $err : '')]);
         }
         $this->teardownDump();
+        // dump 结束即结束这条 SSE：SSE 无 Content-Length，只有真正断开客户端才能收到流结束
+        if ($this->client !== null) {
+            $this->client->endSse();
+        }
     }
 
-    /** 由 Server 事件循环在子进程 stderr 可读时累积（诊断用） */
+    /** 累积子进程 stderr（诊断用，保留最后 1000 字符） */
     public function appendDumpErr(string $chunk): void
     {
         $this->dumpErrBuf = substr($this->dumpErrBuf . $chunk, -1000);
@@ -374,16 +488,6 @@ final class AgentHandler
             return;
         }
         $this->sse('', 'heartbeat', ['ts' => Frame::now(), 'binlogPos' => null]);
-    }
-
-    public function dumpPipe()
-    {
-        return $this->dumpPipe;
-    }
-
-    public function dumpErrPipe()
-    {
-        return $this->dumpErrPipe;
     }
 
     public function isDumping(): bool
@@ -403,6 +507,21 @@ final class AgentHandler
 
     public function handleClose(): void
     {
+        $token = $this->sessionToken;
+        $this->destroySession();
+        $this->respondOnceJson(json_encode([
+            'ok' => true,
+            'session' => $token,
+        ], JSON_UNESCAPED_SLASHES));
+    }
+
+    /**
+     * 会话销毁（close 请求 / 被同参数新 connect 替换 / TTL 回收）：只清资源，不发响应。
+     * 旧 webman 版有 destroy() 却无人调用，HTTP 模式下没有连接关闭事件，
+     * 因此改由 Router（重复 connect 替换）与 Server（空闲 TTL 扫描）两处驱动。
+     */
+    public function destroySession(): void
+    {
         $this->teardownDump();
         $this->teardownConn();
         if ($this->sessionToken !== '') {
@@ -411,54 +530,60 @@ final class AgentHandler
         }
         $this->connected = false;
         $this->dumping = false;
-        $this->respondOnceJson(json_encode([
-            'ok' => true,
-            'session' => $this->sessionToken,
-        ], JSON_UNESCAPED_SLASHES));
     }
 
     private function teardownDump(): void
     {
-        // 顺序关键：先杀子进程并关闭管道，最后 proc_close。
-        // Windows 下 proc_close 会顺带关闭 pipe 句柄，若先 proc_close 再 fclose
-        // 会抛 "must be an open stream resource" 且未捕获将杀死整个服务进程。
+        unset(self::$activeDump[$this->sessionToken]);
         if ($this->dumpProc !== null) {
             $st = @proc_get_status($this->dumpProc);
             if (is_array($st) && ($st['running'] ?? false)) {
                 @proc_terminate($this->dumpProc);
             }
-            $proc = $this->dumpProc;
+            // 不在这里同步 proc_close：它会等待子进程退出，
+            // 在事件循环里就是一次不可控的停顿。交给 reapFinished() 异步回收，
+            // 回收完成后再删临时文件（Windows 上文件被子进程持有期间无法删除）。
+            self::$reapQueue[] = [
+                'proc' => $this->dumpProc,
+                'out' => $this->dumpOutFile,
+                'err' => $this->dumpErrFile,
+            ];
             $this->dumpProc = null;
-        } else {
-            $proc = null;
         }
-        $out = $this->dumpPipe;
-        $this->dumpPipe = null;
-        if ($out !== null && is_resource($out)) {
-            try {
-                fclose($out);
-            } catch (\Throwable $e) {
-                // 句柄已被 proc_close/系统回收：忽略，保证 teardown 幂等
-            }
-        }
-        $err = $this->dumpErrPipe;
-        $this->dumpErrPipe = null;
-        if ($err !== null && is_resource($err)) {
-            try {
-                fclose($err);
-            } catch (\Throwable $e) {
-                // 同上
-            }
-        }
-        if ($proc !== null) {
-            try {
-                proc_close($proc);
-            } catch (\Throwable $e) {
-                // 同上
-            }
-        }
+        $this->dumpOutFile = '';
+        $this->dumpErrFile = '';
+        $this->dumpOffset = 0;
+        $this->dumpErrOffset = 0;
         $this->dumpBuffer = '';
         $this->dumping = false;
+    }
+
+    /**
+     * Server 每个 tick 调用：回收已退出的 dump 子进程句柄并删除其临时输出文件。
+     * 仍在退出的子进程留到下个 tick，避免 proc_close 阻塞事件循环。
+     */
+    public static function reapFinished(): void
+    {
+        if (self::$reapQueue === []) {
+            return;
+        }
+        $pending = [];
+        foreach (self::$reapQueue as $item) {
+            $proc = $item['proc'];
+            $st = @proc_get_status($proc);
+            if (is_array($st) && ($st['running'] ?? false)) {
+                $pending[] = $item;
+                continue;
+            }
+            @proc_close($proc);
+            if ((string) $item['out'] !== '') {
+                @unlink((string) $item['out']);
+            }
+            if ((string) $item['err'] !== '') {
+                @unlink((string) $item['err']);
+            }
+        }
+        self::$reapQueue = $pending;
     }
 
     private function teardownConn(): void
@@ -481,6 +606,19 @@ final class AgentHandler
             return;
         }
         $this->client->writeSse(Frame::sse($id, $type, $payload));
+    }
+
+    /**
+     * dump 预检失败：发错误帧后关闭 SSE 流。
+     * 此时没有子进程可等，Server 只会在 dump 结束或检测到客户端 EOF 时关连接，
+     * 不主动关闭就会永久挂着一个 fd 与一条不结束的 fetch 流。
+     */
+    private function failSse(string $id, int $code, string $message): void
+    {
+        $this->sse($id, 'error', ['code' => $code, 'message' => $message]);
+        if ($this->client !== null) {
+            $this->client->endSse();
+        }
     }
 
     private function respond(string $id, string $type, array $payload): void

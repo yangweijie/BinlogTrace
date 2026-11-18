@@ -15,14 +15,15 @@ declare(strict_types=1);
  *
  * 用法：
  *   ... --host 127.0.0.1 --port 3306 --user root --file binlog.000014 --pos 4 \
- *       [--db test] [--start-ts 1787400000] [--end-ts 1787410000]
+ *       [--db test] [--tables order,user] [--start-ts 1787400000] [--end-ts 1787410000]
  *   密码经环境变量 DMS_MYSQL_PASSWORD 传入（--password 可选，缺省读 ENV）。
  *
  * 时间窗口（epoch 秒，0 = 不限）：
  *   --start-ts  早于该时刻的行事件跳过；并自动定位起点文件（SHOW BINARY LOGS 从新到旧探测
  *               各文件首个行事件 ts，取首事件 ts < startTs 的最新文件，从 pos 4 起读，
  *               经 ROTATE 续读更新文件，窗口前事件由 --start-ts 过滤）。
- *   --end-ts    行事件越过该时刻即退出；无新行事件时用心跳（本地墙钟）越过 endTs+5s 兜底退出。
+ *   --end-ts    行事件越过该时刻即退出；无新行事件时用心跳（本地墙钟）越过 endTs+2s 兜底退出。
+ *               agent 侧已把未来 endTs 钳制到当前时间，worker 这里再兜一层（直跑 CLI 时同样有效）。
  *
  * 输出行（stdout，每行一个 JSON）：
  *   {"type":"change","kind":"insert|update|delete","schema","table","columns","primaryKeys",
@@ -431,6 +432,58 @@ function dms_dump_worker_run(array $args): void
         }
     }
 
+    // krowinski 的 Socket 依赖 ext-sockets；缺失时其 Socket::__destruct 会再抛
+    // "undefined function socket_shutdown()" 致命错误，产生难以定位的 255 退出，故先显式拦截。
+    // 同时检查 socket_shutdown（实际崩掉的符号），避免「部分可用」时仍 255。
+    if (!function_exists('socket_create') || !function_exists('socket_shutdown')) {
+        fwrite(STDERR, "dump_worker: 当前 PHP 缺少 ext-sockets 扩展，无法解析 binlog。"
+            . "请启用 extension=php_sockets.dll（php.ini 的 extension_dir 需指向含该 dll 的 ext 目录）\n");
+        exit(2);
+    }
+
+    // 压缩事件哨兵：包装 krowinski 的 Socket，在包头上识别 TRANSACTION_PAYLOAD_EVENT(40)。
+    // binlog_transaction_compression=ON 时行事件被裹进 40 号事件，krowinski 既不解析也不订阅，
+    // 表现为「连接正常但 0 变更」；这里提前发现，以退出码 12 让 agent 回 1012 诊断帧。
+    // 必须在此声明（autoload 之后）：顶层 implements 会触发 PHP 早绑定，
+    // vendor 尚未加载时直接 "Interface ... not found" fatal，连正常 dump 路径一起拖死。
+    if (!class_exists('DmsCompressionSentinel', false)) {
+        final class DmsCompressionSentinel implements \MySQLReplication\Socket\SocketInterface
+        {
+            public const PAYLOAD_EVENT_TYPE = 40;
+            public const EXIT_CODE = 12;
+
+            public static bool $sawPayloadEvent = false;
+
+            private \MySQLReplication\Socket\Socket $inner;
+
+            public function __construct()
+            {
+                $this->inner = new \MySQLReplication\Socket\Socket();
+            }
+
+            public function connectToStream(string $host, int $port): void
+            {
+                $this->inner->connectToStream($host, $port);
+            }
+
+            public function writeToSocket(string $data): void
+            {
+                $this->inner->writeToSocket($data);
+            }
+
+            public function readFromSocket(int $length): string
+            {
+                $data = $this->inner->readFromSocket($length);
+                // 事件包 = status(1) + 事件头；头里 timestamp(4) 之后 1 字节即 type → 偏移 5
+                if (!self::$sawPayloadEvent && strlen($data) >= 20 && $data[0] === "\0"
+                    && ord($data[5]) === self::PAYLOAD_EVENT_TYPE) {
+                    self::$sawPayloadEvent = true;
+                }
+                return $data;
+            }
+        }
+    }
+
     $opts = dms_parse_args($args);
 
     $host = (string) ($opts['host'] ?? '127.0.0.1');
@@ -441,9 +494,24 @@ function dms_dump_worker_run(array $args): void
     $file = (string) ($opts['file'] ?? '');
     $pos = (string) ($opts['pos'] ?? '4');
     $dbFilter = (string) ($opts['db'] ?? '');   // 仅输出该库的事件（空 = 全部）
+    // 表级过滤（逗号分隔，空 = 全部）：在 --db 命中后再按表名精确匹配，
+    // 用于高频写库（如共享 RDS 的 system_log）在拉取阶段就收窄流量
+    $tablesRaw = (string) ($opts['tables'] ?? '');
+    $tablesFilter = [];
+    foreach (explode(',', $tablesRaw) as $t) {
+        $t = trim($t);
+        if ($t !== '' && $t !== '全部') {
+            $tablesFilter[] = $t;
+        }
+    }
     $max = (int) ($opts['max'] ?? 0);           // 最多输出 N 行 change（0 = 不限，用于测试）
     $startTs = (int) ($opts['start-ts'] ?? 0);  // 早于该时刻（epoch 秒）的行事件跳过；>0 时自动定位起点文件
     $endTs = (int) ($opts['end-ts'] ?? 0);      // 越过该时刻（epoch 秒）后退出
+    // 未来的 endTs 没有意义：既不满足「行越过 endTs」也不会触发心跳兜底（time()>endTs+2），
+    // 会一直 tail 到该时刻。钳制到当前时间，历史追平即退出。
+    if ($endTs > 0 && $endTs > time()) {
+        $endTs = time();
+    }
 
     if ($file === '') {
         fwrite(STDERR, "dump_worker: --file 必填（或由 --start-ts 自动定位）\n");
@@ -484,8 +552,9 @@ function dms_dump_worker_run(array $args): void
             ->withPort($port)
             ->withBinLogFileName($file)
             ->withBinLogPosition((string) $pos)
-            // 心跳 5s：历史窗口越过 endTs 后无新行事件时，靠心跳时间戳兜底退出（60s 太久）
-            ->withHeartbeatPeriod(5)
+            // 心跳 2s：历史窗口越过 endTs 后无新行事件时，靠心跳兜底退出；
+            // 5s 会让每次追平后多等约 3s（旧版即 2s，此处保持一致）
+            ->withHeartbeatPeriod(2)
             ->withEventsOnly([
                 // V1 行事件必须订阅：log_bin_use_v1_row_events=ON 的实例（如阿里云 RDS）
                 // 发 23/24/25，只订 V2 会被 ignoreEvent 静默丢弃 → 永远 0 变更
@@ -499,16 +568,21 @@ function dms_dump_worker_run(array $args): void
                 ConstEventType::ROTATE_EVENT->value,
                 ConstEventType::HEARTBEAT_LOG_EVENT->value,
             ])
-            ->build()
+            ->build(),
+        null,
+        null,
+        null,
+        new DmsCompressionSentinel()
     );
 
-    $state = new class($dbFilter, $max, $startTs, $endTs, $file) {
+    $state = new class($dbFilter, $tablesFilter, $max, $startTs, $endTs, $file) {
         /** 待输出行（当前事务缓冲：XID 事件在行之后，需等 XID 赋号） */
         public array $pending = [];
         public string $binlogFile;
 
         public function __construct(
             public string $dbFilter,
+            public array $tablesFilter,
             public int $max,
             public int $startTs,
             public int $endTs,
@@ -586,6 +660,9 @@ function dms_dump_worker_run(array $args): void
                 if ($st->dbFilter !== '' && $schema !== $st->dbFilter) {
                     return;
                 }
+                if ($st->tablesFilter !== [] && !in_array($table, $st->tablesFilter, true)) {
+                    return;
+                }
                 // 主键列：由 krowinski 通过 INFORMATION_SCHEMA 补全的字段元数据判定（COLUMN_KEY='PRI'）
                 $pks = [];
                 $colDTOs = $tableMap->columnDTOCollection ?? null;
@@ -637,8 +714,8 @@ function dms_dump_worker_run(array $args): void
                 dms_emit(['type' => 'heartbeat', 'ts' => (int) (microtime(true) * 1000)]);
                 // 兜底退出：心跳 = binlog 空闲（已追平当前文件尾）。krowinski 心跳事件的
                 // eventInfo->timestamp 恒为 0（库实现如此），故用本地时间判断：
-                // 窗口终点已过去（endTs+5s 缓冲）→ 不会再有窗口内新事件，正常退出
-                if ($st->endTs > 0 && time() > $st->endTs + 5) {
+                // 窗口终点已过去（endTs+2s 缓冲）→ 不会再有窗口内新事件，正常退出
+                if ($st->endTs > 0 && time() > $st->endTs + 2) {
                     exit(0);
                 }
             }
@@ -648,9 +725,25 @@ function dms_dump_worker_run(array $args): void
     // 同步阻塞循环：父进程负责 kill（proc_terminate / taskkill），stdout 关闭/断连时由 agent 侧
     // teardownDump 终止本进程，不在此另设看门狗
     try {
-        $binLogStream->run();
+        $binLogStream->runWithStopCheck(static function (): bool {
+            // 压缩事务无法解码，尽早退出（退出码 12 → agent 回 1012）
+            return DmsCompressionSentinel::$sawPayloadEvent;
+        });
     } catch (\Throwable $e) {
         fwrite(STDERR, 'dump_worker: ' . $e->getMessage() . "\n");
         exit(1);
     }
+
+    if (DmsCompressionSentinel::$sawPayloadEvent) {
+        fwrite(STDERR, "dump_worker: 检测到 binlog 事务压缩（TRANSACTION_PAYLOAD_EVENT），"
+            . "行事件被封装无法解码；请 SET GLOBAL binlog_transaction_compression=OFF 后重试\n");
+        exit(DmsCompressionSentinel::EXIT_CODE);
+    }
+}
+
+// CLI 直跑入口（php bin/dump_worker.php ...）。
+// 此前文件只定义函数不执行：dev 模式下 AgentHandler 用 PHP_BINARY 拉起本脚本，
+// 子进程立刻退出 0，表现为「dump 正常结束但 0 变更」，且没有任何报错线索。
+if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === realpath(__FILE__)) {
+    dms_dump_worker_main(array_slice($argv, 1));
 }

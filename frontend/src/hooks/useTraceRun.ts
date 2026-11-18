@@ -186,6 +186,9 @@ export function useTraceRun(demoMode: boolean) {
       demoCount,
       startMs,
       endMs,
+      // 库/表下推到 agent：共享实例上 mysql./其他库的变更不再进入流
+      database: cfg.db,
+      tables: cfg.table.includes('全部') || cfg.table.length === 0 ? [] : cfg.table,
     });
     setCollecting(true);
     setProgress(0);

@@ -11,6 +11,13 @@ namespace DmsAgent;
 final class ClientConn
 {
     private string $buf = '';
+    /**
+     * 出站缓冲：SSE 流与短响应都可能在非阻塞 socket 上写不完
+     * （fwrite 返回短字节数），此前直接忽略返回值 → 半行丢失 → 客户端卡在残缺帧上。
+     * 未发送的字节留在这里，由 Server 每个 tick 继续冲刷。
+     */
+    private string $outBuf = '';
+    private bool $closeAfterFlush = false;
     private bool $reqParsed = false;
     private bool $eof = false;
     private bool $sse = false;
@@ -23,8 +30,6 @@ final class ClientConn
     public ?AgentHandler $owner = null;
     /** 标准 CORS 响应头（短响应默认带上，避免浏览器拦截跨域） */
     private array $cors;
-    /** 所属 Server（用于把 dump 管道注册到事件循环） */
-    private ?Server $server = null;
 
     public function markDispatched(): void
     {
@@ -38,10 +43,8 @@ final class ClientConn
 
     public function __construct(
         private $stream,
-        private string $peer,
-        ?Server $server = null
+        private string $peer
     ) {
-        $this->server = $server;
         $this->cors = [
             'Access-Control-Allow-Origin' => '*',
             'Access-Control-Allow-Methods' => 'POST, OPTIONS',
@@ -72,6 +75,18 @@ final class ClientConn
     public function keepAlive(): bool
     {
         return $this->sse;
+    }
+
+    /**
+     * 结束 SSE 流：SSE 响应没有 Content-Length/chunked 编码，
+     * 客户端只能靠 socket 关闭判断流结束，因此必须真正断开而不是留着。
+     */
+    public function endSse(): void
+    {
+        $this->sse = false;
+        // 不能立刻 fclose：错误帧可能还在出站缓冲里。标记待关，由 Server 冲完再断。
+        $this->closeAfterFlush = true;
+        $this->flushOut();
     }
 
     /** 读取客户端可写数据 */
@@ -165,7 +180,10 @@ final class ClientConn
             $out .= "{$k}: {$v}\r\n";
         }
         $out .= "\r\n" . $body;
-        @fwrite($this->stream, $out);
+        $this->outBuf .= $out;
+        // 短响应：写完即关，但要等缓冲冲干净（否则大结果集会被截断）
+        $this->closeAfterFlush = true;
+        $this->flushOut();
     }
 
     /** 进入 SSE 模式：先写响应头，后续 writeSse 持续写 data 行 */
@@ -182,9 +200,10 @@ final class ClientConn
         $out .= "Connection: keep-alive\r\n";
         $out .= "X-Accel-Buffering: no\r\n";
         $out .= "\r\n";
-        @fwrite($this->stream, $out);
+        $this->outBuf .= $out;
         // 先发一个注释保活（部分代理需要）
-        @fwrite($this->stream, ": connected\n\n");
+        $this->outBuf .= ": connected\n\n";
+        $this->flushOut();
     }
 
     public function writeSse(string $sseLine): void
@@ -192,15 +211,49 @@ final class ClientConn
         if (!$this->sse) {
             return;
         }
-        @fwrite($this->stream, $sseLine);
+        $this->outBuf .= $sseLine;
+        $this->flushOut();
     }
 
-    /** 把 dump 子进程 stdout 管道注册到 Server 事件循环（由 AgentHandler 调用） */
-    public function registerDumpPipe($pipe): void
+    /** 尽力把出站缓冲写出去；非阻塞下写不完（返回 0/短写）就留到下个 tick */
+    private function flushOut(): void
     {
-        if ($this->server !== null) {
-            $this->server->registerDumpPipe($pipe, $this->owner);
+        if (!is_resource($this->stream)) {
+            $this->outBuf = '';
+            return;
         }
+        while ($this->outBuf !== '') {
+            $n = @fwrite($this->stream, $this->outBuf, 65536);
+            if ($n === false) {
+                // 对端已关闭：丢弃缓冲，交给 Server 回收连接
+                $this->outBuf = '';
+                return;
+            }
+            if ($n === 0) {
+                return; // 发送缓冲满，下个 tick 再试
+            }
+            $this->outBuf = substr($this->outBuf, $n);
+        }
+    }
+
+    public function pendingOutput(): bool
+    {
+        return $this->outBuf !== '';
+    }
+
+    public function pendingBytes(): int
+    {
+        return strlen($this->outBuf);
+    }
+
+    public function flushPending(): void
+    {
+        $this->flushOut();
+    }
+
+    public function shouldCloseAfterFlush(): bool
+    {
+        return $this->closeAfterFlush;
     }
 
     public function close(): void

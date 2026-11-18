@@ -20,7 +20,15 @@ final class Frame
             'payload' => $payload,
         ];
         $json = json_encode($frame, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        return $json === false ? '' : $json;
+        if ($json !== false) {
+            return $json;
+        }
+        // 编码失败（如 payload 含非法 UTF-8）不能返回空串：那会变成 Content-Length: 0
+        // 的空响应，客户端无从判断。回一帧字面 error（旧 webman 版的 1013 兜底）。
+        $safeId = str_replace(['"', "\\", "\r", "\n"], '', $id);
+        return '{"v":' . AgentConstants::PROTOCOL_VERSION . ',"id":"' . $safeId
+            . '","type":"error","ts":' . self::now()
+            . ',"payload":{"code":' . AgentConstants::META_MISSING . ',"message":"encode error"}}';
     }
 
     /** SSE 格式：data: {json}\n\n */

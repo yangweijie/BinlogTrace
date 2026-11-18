@@ -73,6 +73,17 @@ final class Router
 
         switch ($path) {
             case '/connect':
+                // 前端在 payload.prevSession 里带上自己上一个 token：
+                // 页面刷新/重进连接页会重新 connect，HTTP 模式没有连接关闭事件，
+                // 不显式替换就会不断堆积无人回收的 handler + MySQL 连接。
+                // 只认调用方自己的 token，不用「同参数即替换」（多浏览器同账号会互相踢）。
+                $prev = (string) ($payload['prevSession'] ?? '');
+                if ($prev !== '') {
+                    $stale = SessionManager::get($prev);
+                    if ($stale instanceof AgentHandler) {
+                        $stale->destroySession();
+                    }
+                }
                 $handler = new AgentHandler();
                 $handler->setClient($c);
                 $handler->handleConnect($frameId, $payload);

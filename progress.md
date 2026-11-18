@@ -111,3 +111,46 @@
 | SSE 端到端（/connect + /dump 24h，服务 8080） | 首条 change @ **8.7s**（旧全扫 45-52s），binlog-end @ 13.8s；176 条零遗漏；心跳 0 次；服务日志见探针命中 pos=37419984（margin=256KB）|
 | 接口注意 | /dump 需先 POST /connect（payload.session），带 session 复用，否则 error 1006「会话不存在或已过期」|
 | 实时 dump 回归（不带 startMs） | 无探针日志（count=0，探针仅在 startMs>0 激活）；远端库造 1 insert + 1 delete（jay_music.dms_rt_check，用完 DROP），两帧 change <1s 到达且行镜像完整（columns/primaryKeys/before/after）|
+
+## 2026-11-18 会话：库/表过滤 + 移植缺口补齐（Phase 9/10）
+
+### 起因
+用户报「选了 shengyibao 库，结果页却显示 mysql.ha_health_check / yssf-qdb 等全实例变更（4052 条）」。定位：前端 `startDump` 不发库/表，AgentHandler 拼命令行也不带 `--db`，worker 的过滤分支一直空转。
+
+### 改动
+- `bin/dump_worker.php`：`--tables` 解析（剔除空项与「全部」）+ collectRow 表名精确匹配；V1 行事件订阅此前已补（0b87e50）
+- `src/AgentHandler.php`：`--db`（payload.database 优先，缺省用 connect 库）+ `--tables` 透传；endTs 钳制；sockets 守卫；1012 映射；failSse；**文件重定向 + 增量轮询 + 异步 proc_close**（替代管道）
+- `src/Server.php`：去掉全部管道 select 逻辑，改 `AgentHandler::pollActiveDumps()` / `reapFinished()`；flush-aware 关闭；TTL 扫描
+- `src/ClientConn.php`：出站缓冲（flushOut/pendingOutput/shouldCloseAfterFlush）+ endSse
+- `src/SessionManager.php`：lastSeen + ttlSec（DMS_SESSION_TTL）+ sweepIdle（在 dump 的会话不算空闲）
+- `src/Router.php`：connect 按 `prevSession` 精确替换旧会话
+- `src/Frame.php`：json_encode 失败回字面 1013 帧（不再 Content-Length: 0）
+- `src/MetaGatherer.php`：`SELECT @@server_id` 优先，查不到才回退客户端上报值
+- `frontend/src/lib/ws.ts`：sessionStorage `dms.prevSession`；`useTraceRun.ts`：下发 database/tables；`session.ts`：StartDumpOptions 补类型
+
+### 验证（全部实跑，二进制 03:05 版）
+| 项 | 结果 |
+|---|---|
+| 库过滤 | 1h 窗口 2680 条全部 shengyibao，其他库 0 条 |
+| 表过滤 | `--tables system_log` → 29 条仅该表；多表 + 「全部」容错 → 128+29；HTTP `tables:["system_log"]` → 31 条 + binlog-end |
+| 1 endTs 钳制 | 未来 endMs → 5.4s 收尾 9 条 + binlog-end |
+| 2 sockets 守卫 | `php -n` → 明确文案 + exit 2；对照正常 php 走到 socket_connect |
+| 3 压缩→1012 | 对照 OFF 正常出 insert；SESSION+GLOBAL ON 后 SHOW BINLOG EVENTS 出现 Transaction_payload → worker exit 12 → HTTP error code=1012（同流未压缩行仍正常 emit，无误报）|
+| 4 心跳 | worker 心跳间隔实测 2.01s / 3.05s（原 5s）|
+| 5 SSE 错误关连接 | 并发第二个 dump → 0.06s 返回 1008 且流关闭 |
+| 6 退出前排空 | 同窗口 worker 直跑 706 == HTTP 706，5.5s，无丢帧 |
+| 7 query 串行/复用 | 8 路并发全 200 且 rows 正确；RDS 连接数 29→30（复用）。同步模型已串行，未加死代码 |
+| 8 重复 connect | 带 prevSession → sessions 恒为 1（peer 指纹方案实测无效，已弃）|
+| 9 会话 TTL | DMS_SESSION_TTL=5 实例 40s 后 sessions 1→0，旧 token 回 1006 |
+| 10 编码兜底 | 非法 UTF-8 → `{"code":1013,"message":"encode error"}` |
+| 11 server_id | connect 回显真实 370964309（前端上报 999 被忽略）|
+| 客户端断开（关键回归） | 8s 内 2988 条；掐断后 /ping 全程 ok、无残留子进程、runtime 临时文件已回收（修复前：58 条后永久卡死）|
+| 最终 e2e | connect→dump 14 条全 shengyibao + binlog-end→close 正常 |
+| 前端 | `npm run build`（含 tsc）通过，dist 重建；vitest 26 通过 / 2 既有失败（ws-agent-url，与本次无关）|
+
+### 环境复原
+本地 MySQL `binlog_transaction_compression` 回 OFF；`dms_probe` 库已 DROP；对照插入行 `test.order id=16` 已删除（回到 14 行、max id=15）；测试 worktree（含 vendor junction）已安全移除、主 vendor 完好；临时脚本已删；无残留 agent 进程。
+
+### 下一步
+- Phase 6 提交（用户未要求提交，未动 git）：本次 12 个文件改动 + 探针 v2 等前两日改动
+- 待办：vendor krowinski 补丁固化（patches + composer hook）；ws-agent-url 陈旧断言修复

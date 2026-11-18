@@ -39,3 +39,5 @@
 .codegraph/
 .playwright-cli/
 .workbuddy/
+/opcache_cache/
+/runtime/

@@ -10,6 +10,10 @@ export interface StartDumpOptions {
   demoCount?: number;
   startMs?: number;
   endMs?: number;
+  /** 库级过滤，缺省由 agent 用 connect 时选的库 */
+  database?: string;
+  /** 表级过滤（多选，'全部' 由前端剔除后传空数组 = 不限制） */
+  tables?: string[];
 }
 
 export interface TraceAgent {

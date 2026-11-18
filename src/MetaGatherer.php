@@ -57,9 +57,19 @@ final class MetaGatherer
             'binlogFormat' => (string) $binlogFormat,
             'binlogRowImage' => (string) $binlogRowImage,
             'hasBinlog' => $hasBinlog,
-            'serverId' => $this->serverId,
+            // 真实 server_id 优先（旧版有 SELECT @@server_id）；查不到才回退客户端上报值
+            'serverId' => $this->realServerId(),
             'userPrivileges' => $this->privileges(),
         ];
+    }
+
+    private function realServerId(): int
+    {
+        $row = $this->queryRow('SELECT @@server_id AS sid');
+        if (is_array($row) && isset($row['sid'])) {
+            return (int) $row['sid'];
+        }
+        return $this->serverId;
     }
 
     private function checkBinlogEnabled(): bool
